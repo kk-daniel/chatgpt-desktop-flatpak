@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ChatGPT URL Handler
+Comment=Handle ChatGPT login links
+Exec=chatgpt %u
+Icon=com.openai.ChatGPT
+Type=Application
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/codex;

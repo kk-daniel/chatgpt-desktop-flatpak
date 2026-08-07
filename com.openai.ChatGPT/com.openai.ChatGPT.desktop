@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=ChatGPT
+Comment=ChatGPT Desktop
+Exec=chatgpt %u
+Icon=com.openai.ChatGPT
+Type=Application
+Terminal=false
+Categories=Network;Chat;
+MimeType=x-scheme-handler/codex;
+StartupWMClass=codex

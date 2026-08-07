@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop">
+  <id>com.openai.ChatGPT</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>LicenseRef-proprietary=https://openai.com/policies/terms-of-use/</project_license>
+  <name>ChatGPT</name>
+  <summary>ChatGPT Desktop</summary>
+  <description>
+    <p>
+      ChatGPT Desktop is OpenAI's desktop client for ChatGPT and Codex. It
+      provides the ChatGPT conversation interface together with the Codex
+      coding agent, and bundles the Codex command-line tool it drives.
+    </p>
+    <p>
+      This is an unofficial Flatpak package. The application itself is
+      downloaded from OpenAI when it is first launched.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.openai.ChatGPT.desktop</launchable>
+  <url type="homepage">https://chatgpt.com</url>
+  <developer id="com.openai">
+    <name>OpenAI</name>
+  </developer>
+  <categories>
+    <category>Network</category>
+    <category>Chat</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="26.803.5235.0" date="2026-08-07"/>
+  </releases>
+</component>

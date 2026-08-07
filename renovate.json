@@ -1,0 +1,104 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "platformAutomerge": false,
+  "packageRules": [
+    {
+      "description": "ChatGPT Desktop",
+      "groupName": "chatgpt",
+      "matchPackageNames": ["chatgpt-desktop"],
+      "automerge": true
+    },
+    {
+      "description": "7-Zip",
+      "groupName": "7zip",
+      "matchPackageNames": ["7zip", "ip7z/7zip"],
+      "automerge": true
+    },
+    {
+      "description": "Electron. Held to what the upstream app is built against, and every bump drags the node headers the native modules compile against, so these are reviewed by hand.",
+      "groupName": "electron",
+      "matchPackageNames": ["electron"],
+      "automerge": false
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "ChatGPT Desktop build, recorded bare in expected-version",
+      "managerFilePatterns": [
+        "/\\/expected-version$/"
+      ],
+      "matchStrings": [
+        "(?<currentValue>\\d+(?:\\.\\d+)+)"
+      ],
+      "depNameTemplate": "chatgpt-desktop",
+      "datasourceTemplate": "custom.chatgpt-desktop",
+      "versioningTemplate": "loose"
+    },
+    {
+      "customType": "regex",
+      "description": "7-Zip Linux archive URLs",
+      "managerFilePatterns": [
+        "/\\/com\\.openai\\.ChatGPT\\.yaml$/"
+      ],
+      "matchStrings": [
+        "url: https://github\\.com/ip7z/7zip/releases/download/(?<currentValue>[\\d.]+)/7z\\d+-linux-(?<arch>x64|arm64)\\.tar\\.xz"
+      ],
+      "depNameTemplate": "7zip",
+      "packageNameTemplate": "ip7z/7zip",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "loose",
+      "autoReplaceStringTemplate": "url: https://github.com/ip7z/7zip/releases/download/{{{newValue}}}/7z{{{replace '\\.' '' newValue}}}-linux-{{{arch}}}.tar.xz"
+    },
+    {
+      "customType": "regex",
+      "description": "Electron release archive URLs",
+      "managerFilePatterns": [
+        "/\\/com\\.openai\\.ChatGPT\\.yaml$/"
+      ],
+      "matchStrings": [
+        "url: https://github\\.com/electron/electron/releases/download/v(?<currentValue>[\\d.]+)/electron-v[\\d.]+-linux-(?<arch>x64|arm64)\\.zip"
+      ],
+      "depNameTemplate": "electron",
+      "datasourceTemplate": "npm",
+      "versioningTemplate": "npm",
+      "autoReplaceStringTemplate": "url: https://github.com/electron/electron/releases/download/v{{{newValue}}}/electron-v{{{newValue}}}-linux-{{{arch}}}.zip"
+    },
+    {
+      "customType": "regex",
+      "description": "freedesktop-sdk runtime version (manifest and CI image)",
+      "managerFilePatterns": [
+        "/\\/com\\.openai\\.ChatGPT\\.yaml$/",
+        "/\\.github\\/workflows\\/flatpak-build\\.yaml$/"
+      ],
+      "matchStrings": [
+        "runtime-version: \"(?<currentValue>[\\d.]+)\"",
+        "base-version: \"(?<currentValue>[\\d.]+)\"",
+        "image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-(?<currentValue>[\\d.]+)"
+      ],
+      "depNameTemplate": "org.freedesktop.Sdk",
+      "datasourceTemplate": "custom.flathub-runtime",
+      "versioningTemplate": "loose"
+    }
+  ],
+  "customDatasources": {
+    "chatgpt-desktop": {
+      "defaultRegistryUrlTemplate": "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json",
+      "format": "json",
+      "transformTemplates": [
+        "{ \"releases\": [{ \"version\": buildVersion }] }"
+      ]
+    },
+    "flathub-runtime": {
+      "defaultRegistryUrlTemplate": "https://flathub.org/api/v2/runtimes",
+      "format": "json",
+      "transformTemplates": [
+        "{ \"releases\": $each($$, function($v, $k) { $k })[$contains(\"org.freedesktop.Sdk/x86_64/\")] ~> $map(function($k) { { \"version\": $split($k, \"/\")[2] } }) }"
+      ]
+    }
+  }
+}

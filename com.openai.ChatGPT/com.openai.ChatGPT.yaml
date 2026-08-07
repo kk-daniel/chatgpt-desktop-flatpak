@@ -1,0 +1,232 @@
+app-id: com.openai.ChatGPT
+# Sdk rather than Platform as the runtime: the payload is fetched and
+# unpacked at first launch, which needs curl and zenity present at run
+# time, not just at build time.
+runtime: org.freedesktop.Sdk
+runtime-version: "25.08"
+sdk: org.freedesktop.Sdk
+base: org.electronjs.Electron2.BaseApp
+base-version: "25.08"
+command: chatgpt
+tags: [proprietary]
+separate-locales: false
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.node24
+add-extensions:
+  # Mount point for tool extensions such as com.visualstudio.code.tool.podman.
+  # Not downloaded unless the user installs one; chatgpt.sh puts whatever
+  # lands here on PATH.
+  com.visualstudio.code.tool:
+    directory: tools
+    subdirectories: true
+    version: '25.08'
+    add-ld-path: lib
+    no-autodownload: true
+    autodelete: false
+  # Node at *run* time, not just for node-gyp at build time: Codex runs MCP
+  # servers, which are usually npm packages launched with node/npx from
+  # ~/.codex/config.toml. Auto-downloaded, so they work out of the box.
+  org.freedesktop.Sdk.Extension.node24:
+    directory: lib/sdk/node24
+    version: '25.08'
+    add-ld-path: lib
+    no-autodownload: false
+    autodelete: false
+build-options:
+  append-path: /usr/lib/sdk/node24/bin
+finish-args:
+  - --require-version=0.10.3
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --env=XCURSOR_PATH=/run/host/user-share/icons:/run/host/share/icons
+  - --env=ELECTRON_OZONE_PLATFORM_HINT=wayland
+  # Sandbox-private ~/.codex for config.toml, skills, plugins and the
+  # session SQLite databases. Mapped at $HOME/.codex inside the sandbox,
+  # stored at ~/.var/app/com.openai.ChatGPT/.codex on the host -- not
+  # shared with a host-installed codex CLI. No access to the real home
+  # directory is granted; files reach the app through the file-chooser
+  # portal instead.
+  - --persist=.codex
+  # Electron safeStorage keeps the ChatGPT session token in the login
+  # keyring via libsecret. Without this the app cannot persist a login and
+  # re-prompts on every start.
+  - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.freedesktop.Notifications
+  # Notification-area / tray (StatusNotifierItem on KDE & GNOME-via-extension,
+  # AppIndicator on Ubuntu/Cinnamon). Without these the SNI registration
+  # silently fails under Flatpak and no icon appears. Modern Electron
+  # registers the item by object path on its existing bus connection, so
+  # we don't need to --own-name the per-PID SNI bus name.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=com.canonical.AppMenu.Registrar
+  - --talk-name=com.canonical.AppMenu.Registrar.*
+  - --talk-name=com.canonical.indicator.application
+  # libappindicator claims a per-PID bus name under
+  # com.canonical.indicator.application; without ownership, the
+  # registration call to the watcher silently no-ops.
+  - --own-name=com.canonical.indicator.application.*
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/gtk-doc
+  - '*.la'
+modules:
+  - name: 7zip
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 7zz /app/bin/7zz
+      - ln -s 7zz /app/bin/7z
+    sources:
+      - type: archive
+        only-arches: [x86_64]
+        url: https://github.com/ip7z/7zip/releases/download/26.01/7z2601-linux-x64.tar.xz
+        sha256: 8ea0fc8a135e7b848e80a4116fe22dff56c8c4518dde1f43cce67f4e340b437a
+        strip-components: 0
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/ip7z/7zip/releases/download/26.01/7z2601-linux-arm64.tar.xz
+        sha256: 39f8c9070c300a63c7484d9a983119ef3edf841e1ddf69f1affae29fdec5f612
+        strip-components: 0
+
+  - name: electron
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/electron
+      - cp -a . /app/electron/
+      - chmod +x /app/electron/electron /app/electron/chrome_crashpad_handler
+      # Drop the suid sandbox helper: zypak provides namespace sandboxing
+      # via CHROME_DEVEL_SANDBOX, and Chromium aborts if it sees a
+      # non-setuid chrome-sandbox sitting next to the binary.
+      - rm -f /app/electron/chrome-sandbox
+      # Electron would otherwise boot its built-in "no app loaded" window.
+      - rm -f /app/electron/resources/default_app.asar
+      # Electron resolves the app at <exe_dir>/resources/app.asar AND reads
+      # auxiliary files (the bundled Linux codex CLI, ripgrep, tray icons,
+      # plugins) from process.resourcesPath i.e. <exe_dir>/resources.
+      # Passing an app path on the command line is not an option: that is
+      # handled by default_app.asar, which Electron skips once the app
+      # looks packaged -- and it has to look packaged, or the app picks its
+      # development state paths. So resources must genuinely sit next to
+      # the binary.
+      #
+      # /app is read-only at run time, so point it at /var/data, which is
+      # the app's own writable data directory and, unlike $XDG_DATA_HOME,
+      # has the same absolute path in every sandbox -- so the link can be
+      # made now and resolved after chatgpt-fetch populates it.
+      - rm -rf /app/electron/resources
+      - ln -s /var/data/chatgpt/resources /app/electron/resources
+      - ln -s /var/data/chatgpt/assets /app/electron/assets
+    sources:
+      # Must stay in step with the Electron the upstream app is built
+      # against (package.json devDependencies.electron). Native modules
+      # below are compiled against this exact version's headers.
+      - type: archive
+        only-arches: [x86_64]
+        url: https://github.com/electron/electron/releases/download/v42.3.0/electron-v42.3.0-linux-x64.zip
+        sha256: 487a667ca6a734b958c16cff1df74d9d44d2c18a6cccdb4dd51f6301a356c420
+        # Electron zips have no top-level directory, so the default
+        # strip-components: 1 flattens locales/ and resources/ into the root.
+        strip-components: 0
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/electron/electron/releases/download/v42.3.0/electron-v42.3.0-linux-arm64.zip
+        sha256: 2a375ff973fb7bddc538a4f67b2141947e9d72513a1baa2beabec2a7f65cd0f0
+        strip-components: 0
+
+  # The MSIX ships better-sqlite3 and node-pty as Windows DLLs. Without
+  # Linux builds the app comes up but every session store fails ("SQLite
+  # database is inaccessible") and the terminal never spawns. Compile both
+  # against the Electron headers pinned above; --nodedir keeps node-gyp
+  # entirely offline, which flatpak-builder requires.
+  #
+  # better-sqlite3 is 12.11.1, not the 12.9.0 the MSIX declares: 12.9.0
+  # predates the V8 API change in Electron 42 (External::Value() gained an
+  # Isolate* parameter) and does not compile. The lib/*.js of 12.9.0 and
+  # 12.11.1 are byte-identical, so only the compiled binary is swapped in
+  # and the JavaScript the app loads is untouched.
+  - name: native-modules
+    buildsystem: simple
+    build-options:
+      env:
+        npm_config_nodedir: /run/build/native-modules/headers
+    build-commands:
+      # --force_build=1 is required for better-sqlite3: without it the
+      # binding.gyp short-circuits to a prebuilt binary and emits only
+      # stamp files, leaving no .node behind.
+      - nodegyp=/usr/lib/sdk/node24/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js;
+        arch=$(uname -m | sed -e 's/x86_64/x64/' -e 's/aarch64/arm64/');
+        headers=/run/build/native-modules/headers;
+        (cd better-sqlite3 && node "$nodegyp" rebuild --release --force_build=1
+        --arch="$arch" --nodedir="$headers") &&
+        (cd node-pty && node "$nodegyp" rebuild --release
+        --arch="$arch" --nodedir="$headers")
+      - install -Dm644 better-sqlite3/build/Release/better_sqlite3.node
+        /app/share/chatgpt/native/better_sqlite3.node
+      - install -Dm644 node-pty/build/Release/pty.node
+        /app/share/chatgpt/native/pty.node
+    sources:
+      - type: archive
+        url: https://artifacts.electronjs.org/headers/dist/v42.3.0/node-v42.3.0-headers.tar.gz
+        sha256: 821009f9c1830050d894aef9e61906cb0a537b2000b2d9bbed9985fff1d5e0d0
+        dest: headers
+      - type: archive
+        url: https://registry.npmjs.org/better-sqlite3/-/better-sqlite3-12.11.1.tgz
+        sha256: ebf0ed75a7a59dbcb3b24bbd014ef49d9f15bc328e4adcbf516f2a8fadfa2835
+        dest: better-sqlite3
+      - type: archive
+        url: https://registry.npmjs.org/node-pty/-/node-pty-1.1.0.tgz
+        sha256: c7517f19083ddcb05f276904680eb2b11a6b5ecab778b8e4e5685a6d645b3f60
+        dest: node-pty
+      # node-pty's binding.gyp resolves its include path through
+      # require('node-addon-api'), so the package has to sit in node-pty's
+      # own node_modules at configure time.
+      - type: archive
+        url: https://registry.npmjs.org/node-addon-api/-/node-addon-api-8.9.0.tgz
+        sha256: 19b87e2ce3a77fec0121ac97d7db088aae28aacfff481adab50d5f61b70e68f4
+        dest: node-pty/node_modules/node-addon-api
+
+  # No extra-data source: OpenAI serves the package only from a mutable
+  # "latest" URL, so any sha256 pinned here would go stale on their next
+  # release and break every fresh install until re-pinned. chatgpt-fetch
+  # pulls it on first launch instead. expected-version records the build
+  # this packaging was tested against, and is what chatgpt-fetch compares
+  # the installed payload against to decide whether to warn or refresh.
+  - name: chatgpt
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 chatgpt.sh /app/bin/chatgpt
+      - install -Dm755 chatgpt-fetch.sh /app/bin/chatgpt-fetch
+      - install -Dm644 expected-version /app/share/chatgpt/expected-version
+      - install -Dm644 ${FLATPAK_ID}.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 ${FLATPAK_ID}.desktop -t /app/share/applications
+      - install -Dm644 ${FLATPAK_ID}-url-handler.desktop -t /app/share/applications
+      - install -Dm644 ${FLATPAK_ID}.png /app/share/icons/hicolor/256x256/apps/${FLATPAK_ID}.png
+      # Mount points for the add-extensions above. Flatpak refuses to
+      # install an extension whose directory does not exist in the build.
+      - mkdir -p /app/lib/sdk/node24
+      - mkdir -p /app/tools
+      # Put the node24 extension on PATH under its usual names, so an MCP
+      # server configured as `npx -y some-server` resolves.
+      - ln -s /app/lib/sdk/node24/bin/node /app/bin/node
+      - ln -s /app/lib/sdk/node24/bin/npm /app/bin/npm
+      - ln -s /app/lib/sdk/node24/bin/npx /app/bin/npx
+      - ln -s /app/lib/sdk/node24/bin/corepack /app/bin/corepack
+    sources:
+      - type: file
+        path: chatgpt.sh
+      - type: file
+        path: chatgpt-fetch.sh
+      - type: file
+        path: expected-version
+      - type: file
+        path: com.openai.ChatGPT.metainfo.xml
+      - type: file
+        path: com.openai.ChatGPT.desktop
+      - type: file
+        path: com.openai.ChatGPT-url-handler.desktop
+      - type: file
+        path: com.openai.ChatGPT.png

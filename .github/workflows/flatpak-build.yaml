@@ -1,0 +1,406 @@
+name: Build Flatpak
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - "chatgpt-*"
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  APP_ID: com.openai.ChatGPT
+
+# The published OSTree repo is read-modify-write over HTTP: build restores
+# the live Pages site, commits on top, and deploy overwrites it. Two
+# overlapping publish runs would drop one release's objects, leaving
+# clients that already pulled it unable to update.
+concurrency:
+  group: publish-${{ github.ref_type == 'tag' && 'tag' || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Renovate can bump a version string but not the things derived from it:
+  # the Electron / 7-Zip checksums, and the metainfo release entry that
+  # follows a ChatGPT bump. Fill those in on the Renovate branch before the
+  # build job ever sees it.
+  post-renovate:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.actor == 'renovate[bot]' && (github.head_ref == 'renovate/chatgpt' || github.head_ref == 'renovate/major-chatgpt' || github.head_ref == 'renovate/7zip' || github.head_ref == 'renovate/major-7zip' || github.head_ref == 'renovate/electron' || github.head_ref == 'renovate/major-electron')
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ github.head_ref }}
+          fetch-depth: 2
+      - name: Update metainfo
+        if: github.head_ref == 'renovate/chatgpt' || github.head_ref == 'renovate/major-chatgpt'
+        run: ./${APP_ID}/update-metainfo.sh
+      - name: Update 7-Zip checksums
+        if: github.head_ref == 'renovate/7zip' || github.head_ref == 'renovate/major-7zip'
+        run: ./${APP_ID}/update-7zip-checksum.sh
+      - name: Update Electron checksums
+        if: github.head_ref == 'renovate/electron' || github.head_ref == 'renovate/major-electron'
+        run: ./${APP_ID}/update-electron-checksum.sh
+      - name: Get last commit message
+        id: last-commit
+        run: |
+          echo "message=$(git log -1 --pretty=%s)" >> "$GITHUB_OUTPUT"
+          echo "author=$(git log -1 --pretty=\"%an <%ae>\")" >> "$GITHUB_OUTPUT"
+          echo "author_name=$(git log -1 --pretty=%an)" >> "$GITHUB_OUTPUT"
+          echo "author_email=$(git log -1 --pretty=%ae)" >> "$GITHUB_OUTPUT"
+      - name: Commit changes
+        uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d # v7.2.0
+        with:
+          commit_author: ${{ steps.last-commit.outputs.author }}
+          commit_user_name: ${{ steps.last-commit.outputs.author_name }}
+          commit_user_email: ${{ steps.last-commit.outputs.author_email }}
+          commit_message: ${{ steps.last-commit.outputs.message }}
+          commit_options: '--amend --no-edit'
+          push_options: '--force'
+          file_pattern: ${{ env.APP_ID }}/${{ env.APP_ID }}.yaml ${{ env.APP_ID }}/${{ env.APP_ID }}.metainfo.xml
+
+  extract-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.extract-version.outputs.version }}
+      version-changed: ${{ steps.extract-version.outputs.version-changed }}
+    needs: post-renovate
+    if: >-
+      always() && !cancelled() &&
+      needs.post-renovate.result == 'skipped'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Extract version
+        id: extract-version
+        run: |
+          set -eo pipefail
+          VERSION="$(cat ${APP_ID}/expected-version)"
+          if [ -z "$VERSION" ]; then
+            echo "Error: expected-version is empty" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          BEFORE="${{ github.event.before }}"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            echo "version-changed=true" >> "$GITHUB_OUTPUT"
+          elif ! git diff --quiet "$BEFORE" "${{ github.sha }}" -- ${APP_ID}/expected-version; then
+            echo "version-changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version-changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    permissions:
+      contents: read
+      checks: write
+    needs: extract-version
+    if: >-
+      always() && !cancelled() &&
+      needs.extract-version.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup GPG
+        env:
+          GPG_KEY_GREP: ${{ vars.GPG_KEY_GREP }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_KEY_ID: ${{ vars.GPG_KEY_ID }}
+        run: |
+          set -eo pipefail
+          gpg --list-keys --with-keygrip
+          echo "allow-preset-passphrase" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye
+          echo "$GPG_PASSPHRASE" | /usr/libexec/gpg-preset-passphrase --preset "$GPG_KEY_GREP"
+          echo "$GPG_PRIVATE_KEY" > repo.private.gpg
+          gpg --import --batch repo.private.gpg
+          rm repo.private.gpg
+          rm -f repo.gpg
+          gpg --export "$GPG_KEY_ID" > repo.gpg
+      - name: Restore repository
+        if: github.ref_type == 'tag'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GPG_KEY_ID: ${{ vars.GPG_KEY_ID }}
+        run: |
+          set -eo pipefail
+          BASE_URL="$(gh api /repos/${GITHUB_REPOSITORY}/pages --jq .html_url)"
+          curl -o/dev/null -sf "${BASE_URL}summary" || exit 0
+          ostree --repo=repo init --mode=archive
+          ostree --repo=repo remote add chatgpt-flatpak "${BASE_URL%/}" --gpg-import=repo.gpg
+          ostree --repo=repo pull --mirror chatgpt-flatpak --depth=-1
+          find repo/refs/heads/app repo/refs/heads/runtime -type f -not -name main -delete
+          flatpak build-update-repo --gpg-sign="$GPG_KEY_ID" --generate-static-deltas --prune repo
+          curl -o repo/config -sf "${BASE_URL}config"
+          rm -rf repo/*.trustedkeys.gpg repo/extensions repo/state repo/tmp
+      - name: Clean branch name
+        id: clean-branch-name
+        env:
+          BRANCH: ${{ (github.ref_type == 'tag' && 'main') || github.head_ref || github.ref_name }}
+        run: echo "branch=${BRANCH//\//-}" >> "$GITHUB_OUTPUT"
+      - name: Build Flatpak
+        id: build-flatpak
+        uses: flatpak/flatpak-github-actions/flatpak-builder@401fe28a8384095fc1531b9d320b292f0ee45adb # v6.7
+        with:
+          build-bundle: false
+          upload-artifact: false
+          manifest-path: ${{ env.APP_ID }}/${{ env.APP_ID }}.yaml
+          branch: ${{ steps.clean-branch-name.outputs.branch }}
+          gpg-sign: ${{ vars.GPG_KEY_ID }}
+      - name: Create bundle
+        id: create-bundle
+        env:
+          BRANCH: ${{ steps.clean-branch-name.outputs.branch }}
+        run: |
+          flatpak --user remote-add --no-gpg-verify build-repo repo
+          flatpak --user install --noninteractive build-repo ${{ env.APP_ID }}//$BRANCH
+          flatpak build-bundle ~/.local/share/flatpak/repo ${{ env.APP_ID }}.flatpak --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo ${{ env.APP_ID }} $BRANCH
+      - name: Smoke test build output
+        env:
+          BRANCH: ${{ steps.clean-branch-name.outputs.branch }}
+        run: |
+          # The payload is no longer part of the build, so what is checked
+          # here is what the build itself is responsible for: Linux native
+          # modules, and the resources symlinks chatgpt-fetch populates.
+          set -eo pipefail
+          loc="$(flatpak --user info --show-location ${APP_ID}//${BRANCH})"
+          fail=0
+
+          is_elf() { [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; }
+
+          for f in better_sqlite3.node pty.node; do
+            p="$loc/files/share/chatgpt/native/$f"
+            if [ ! -f "$p" ]; then
+              echo "ERROR: native module not built: $f" >&2
+              fail=1
+            elif ! is_elf "$p"; then
+              echo "ERROR: not a Linux ELF binary: $f" >&2
+              fail=1
+            fi
+          done
+
+          for link in resources assets; do
+            target="$(readlink "$loc/files/electron/$link" || true)"
+            if [ "$target" != "/var/data/chatgpt/$link" ]; then
+              echo "ERROR: /app/electron/$link points at '$target'" >&2
+              fail=1
+            fi
+          done
+
+          [ -s "$loc/files/share/chatgpt/expected-version" ] \
+            || { echo "ERROR: expected-version missing or empty" >&2; fail=1; }
+
+          [ "$fail" -eq 0 ] && echo "Build output looks sane"
+          exit "$fail"
+
+      # The risky logic now runs on the user's machine at first launch, so
+      # exercise it for real: download the current package and unpack it
+      # exactly as a first start would. Skipped on pull requests, where the
+      # ~700 MB round trip is not worth the feedback delay.
+      - name: End-to-end fetch test
+        if: github.event_name != 'pull_request'
+        env:
+          BRANCH: ${{ steps.clean-branch-name.outputs.branch }}
+        run: |
+          set -eo pipefail
+          flatpak run --branch="$BRANCH" --command=chatgpt-fetch ${APP_ID}
+
+          data=~/.var/app/${APP_ID}/data/chatgpt
+          res="$data/resources"
+          fail=0
+
+          is_elf() { [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; }
+
+          [ -s "$data/version" ] || { echo "ERROR: no version recorded" >&2; fail=1; }
+          [ -f "$res/app.asar" ] || { echo "ERROR: app.asar missing" >&2; fail=1; }
+
+          for f in \
+            "$res/app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+            "$res/app.asar.unpacked/node_modules/node-pty/build/Release/pty.node" \
+            "$res/codex" "$res/rg"
+          do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: missing after fetch: $f" >&2
+              fail=1
+            elif ! is_elf "$f"; then
+              echo "ERROR: Windows binary survived the swap: $f" >&2
+              fail=1
+            fi
+          done
+
+          [ -x "$res/codex" ] || { echo "ERROR: codex CLI not executable" >&2; fail=1; }
+
+          if [ -n "$(find "$res" -name '*%*' -print -quit 2>/dev/null)" ]; then
+            echo "ERROR: percent-encoded paths left undecoded" >&2
+            find "$res" -name '*%*' | head -5 >&2
+            fail=1
+          fi
+
+          if [ -n "$(find "$res" \( -name '*.exe' -o -name '*.dll' \) -print -quit 2>/dev/null)" ]; then
+            echo "ERROR: Windows binaries left in the unpacked tree" >&2
+            fail=1
+          fi
+
+          # chatgpt-fetch records the Electron the payload was built
+          # against. A major gap means the bundled Electron is wrong for
+          # this build, and the symptom on a user's machine is an API that
+          # silently does not exist -- so fail here instead. This is what
+          # tells us an Electron bump is actually required, rather than
+          # guessing from Renovate's version numbers.
+          loc="$(flatpak --user info --show-location ${APP_ID}//${BRANCH})"
+          target="$(cat "$data/electron-target" 2>/dev/null || true)"
+          ours="$(cat "$loc/files/electron/version" 2>/dev/null || true)"
+          if [ -z "$target" ] || [ -z "$ours" ]; then
+            echo "ERROR: could not compare Electron versions (target='$target' bundled='$ours')" >&2
+            fail=1
+          elif [ "${target%%.*}" != "${ours%%.*}" ]; then
+            echo "ERROR: payload targets Electron $target but this Flatpak bundles $ours" >&2
+            echo "Bump the electron module and run update-electron-checksum.sh." >&2
+            fail=1
+          elif [ "$target" != "$ours" ]; then
+            echo "note: payload targets Electron $target, bundling $ours (same major)"
+          fi
+
+          # A second run must be a silent no-op, not another download.
+          before="$(cat "$data/version" 2>/dev/null || true)"
+          flatpak run --branch="$BRANCH" --command=chatgpt-fetch ${APP_ID}
+          [ "$(cat "$data/version")" = "$before" ] \
+            || { echo "ERROR: second fetch changed the payload" >&2; fail=1; }
+
+          [ "$fail" -eq 0 ] && echo "Fetched and unpacked ChatGPT $before cleanly"
+          exit "$fail"
+      - name: Upload bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.APP_ID }}-x86_64.flatpak
+          path: ${{ env.APP_ID }}.flatpak
+      - name: Update repo
+        id: update-repo
+        env:
+          GPG_KEY_ID: ${{ vars.GPG_KEY_ID }}
+        run: flatpak build-update-repo --gpg-sign="$GPG_KEY_ID" --generate-static-deltas --prune repo
+      - name: Initialize github-pages
+        id: init-github-pages
+        run: |
+          set -eo pipefail
+          gpg_base64="$(base64 -w 0 repo.gpg)"
+          cat > repo/chatgpt.flatpakrepo <<EOF
+          [Flatpak Repo]
+          Title=ChatGPT
+          Url=https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+          Homepage=https://chatgpt.com
+          GPGKey=$gpg_base64
+          EOF
+          cat > repo/index.html <<EOF
+          <!DOCTYPE html>
+          <html>
+            <head><title>ChatGPT Flatpak Repository</title></head>
+            <body>
+              <h1>ChatGPT</h1>
+              <p>This is an unofficial Flatpak repository for ChatGPT Desktop.</p>
+              <pre>flatpak remote-add --if-not-exists chatgpt-flatpak https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/chatgpt.flatpakrepo
+          flatpak install ${APP_ID}</pre>
+            </body>
+          </html>
+          EOF
+      - name: Upload repository as artifact (tags only)
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flatpak-repo
+          path: repo/
+          retention-days: 30
+      - name: Save pages artifact
+        id: save-repo
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: repo/
+      - name: Publish check result
+        uses: LouisBrunner/checks-action@937cbbcde3259005b50746dc91cde29098aac2ff # v3.1.0
+        if: always()
+        with:
+          token: ${{ github.token }}
+          name: Build Result
+          conclusion: ${{ job.status }}
+          output: |
+            {
+              "summary": "${{ job.status }}",
+              "text_description": "Build flatpak: ${{ steps.build-flatpak.conclusion }}\nUpdate repo: ${{ steps.update-repo.conclusion }}\nInit github pages: ${{ steps.init-github-pages.conclusion }}\nSave repo: ${{ steps.save-repo.conclusion }}"
+            }
+
+  auto-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs: [build, extract-version]
+    if: >-
+      always() && !cancelled() &&
+      needs.build.result == 'success' &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_type != 'tag' &&
+      needs.extract-version.outputs.version-changed == 'true'
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - name: Download flatpak artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "*.flatpak"
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          tag_name: chatgpt-${{ needs.extract-version.outputs.version }}
+          files: "*.flatpak"
+          overwrite_files: true
+          body: "ChatGPT Desktop ${{ needs.extract-version.outputs.version }}"
+          prerelease: true
+
+  deploy:
+    if: >-
+      always() && !cancelled() &&
+      github.ref_type == 'tag' &&
+      needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      - name: Download flatpak artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "*.flatpak"
+          merge-multiple: true
+      - name: Publish flatpak
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: "*.flatpak"
+          overwrite_files: true
+          prerelease: false
+      - name: Deploy github pages
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

@@ -1,0 +1,22 @@
+# Flatpak repository
+/repo
+/test-repo
+/flathub
+
+# Build directories
+.flatpak-builder
+/build
+/builddir
+
+# Flatpak bundles
+*.flatpak
+
+# Temporary files
+*.tmp
+
+# Private key material. repo.gpg is the *public* key and is committed on
+# purpose; everything below is the secret half, which must never be.
+*.private.gpg
+*.asc
+*.pem
+secring*
