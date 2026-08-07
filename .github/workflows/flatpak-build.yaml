@@ -42,20 +42,22 @@ jobs:
           fetch-depth: 2
       - name: Update metainfo
         if: github.head_ref == 'renovate/chatgpt' || github.head_ref == 'renovate/major-chatgpt'
-        run: ./${APP_ID}/update-metainfo.sh
+        run: '"./${APP_ID}/update-metainfo.sh"'
       - name: Update 7-Zip checksums
         if: github.head_ref == 'renovate/7zip' || github.head_ref == 'renovate/major-7zip'
-        run: ./${APP_ID}/update-7zip-checksum.sh
+        run: '"./${APP_ID}/update-7zip-checksum.sh"'
       - name: Update Electron checksums
         if: github.head_ref == 'renovate/electron' || github.head_ref == 'renovate/major-electron'
-        run: ./${APP_ID}/update-electron-checksum.sh
+        run: '"./${APP_ID}/update-electron-checksum.sh"'
       - name: Get last commit message
         id: last-commit
         run: |
-          echo "message=$(git log -1 --pretty=%s)" >> "$GITHUB_OUTPUT"
-          echo "author=$(git log -1 --pretty=\"%an <%ae>\")" >> "$GITHUB_OUTPUT"
-          echo "author_name=$(git log -1 --pretty=%an)" >> "$GITHUB_OUTPUT"
-          echo "author_email=$(git log -1 --pretty=%ae)" >> "$GITHUB_OUTPUT"
+          {
+            echo "message=$(git log -1 --pretty=%s)"
+            echo "author=$(git log -1 --pretty='%an <%ae>')"
+            echo "author_name=$(git log -1 --pretty=%an)"
+            echo "author_email=$(git log -1 --pretty=%ae)"
+          } >> "$GITHUB_OUTPUT"
       - name: Commit changes
         uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d # v7.2.0
         with:
@@ -87,17 +89,19 @@ jobs:
         id: extract-version
         run: |
           set -eo pipefail
-          VERSION="$(cat ${APP_ID}/expected-version)"
+          VERSION="$(cat "${APP_ID}/expected-version")"
           if [ -z "$VERSION" ]; then
             echo "Error: expected-version is empty" >&2
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           BEFORE="${{ github.event.before }}"
-          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "version-changed=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
              || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             echo "version-changed=true" >> "$GITHUB_OUTPUT"
-          elif ! git diff --quiet "$BEFORE" "${{ github.sha }}" -- ${APP_ID}/expected-version; then
+          elif ! git diff --quiet "$BEFORE" "${{ github.sha }}" -- "${APP_ID}/expected-version"; then
             echo "version-changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "version-changed=false" >> "$GITHUB_OUTPUT"
@@ -143,7 +147,7 @@ jobs:
           GPG_KEY_ID: ${{ vars.GPG_KEY_ID }}
         run: |
           set -eo pipefail
-          BASE_URL="$(gh api /repos/${GITHUB_REPOSITORY}/pages --jq .html_url)"
+          BASE_URL="$(gh api "/repos/${GITHUB_REPOSITORY}/pages" --jq .html_url)"
           curl -o/dev/null -sf "${BASE_URL}summary" || exit 0
           ostree --repo=repo init --mode=archive
           ostree --repo=repo remote add chatgpt-flatpak "${BASE_URL%/}" --gpg-import=repo.gpg
@@ -172,8 +176,8 @@ jobs:
           BRANCH: ${{ steps.clean-branch-name.outputs.branch }}
         run: |
           flatpak --user remote-add --no-gpg-verify build-repo repo
-          flatpak --user install --noninteractive build-repo ${{ env.APP_ID }}//$BRANCH
-          flatpak build-bundle ~/.local/share/flatpak/repo ${{ env.APP_ID }}.flatpak --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo ${{ env.APP_ID }} $BRANCH
+          flatpak --user install --noninteractive build-repo "${APP_ID}//${BRANCH}"
+          flatpak build-bundle "$HOME/.local/share/flatpak/repo" "${APP_ID}.flatpak" --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo "$APP_ID" "$BRANCH"
       - name: Smoke test build output
         env:
           BRANCH: ${{ steps.clean-branch-name.outputs.branch }}
@@ -182,7 +186,7 @@ jobs:
           # here is what the build itself is responsible for: Linux native
           # modules, and the resources symlinks chatgpt-fetch populates.
           set -eo pipefail
-          loc="$(flatpak --user info --show-location ${APP_ID}//${BRANCH})"
+          loc="$(flatpak --user info --show-location "${APP_ID}//${BRANCH}")"
           fail=0
 
           is_elf() { [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; }
@@ -222,9 +226,9 @@ jobs:
           BRANCH: ${{ steps.clean-branch-name.outputs.branch }}
         run: |
           set -eo pipefail
-          flatpak run --branch="$BRANCH" --command=chatgpt-fetch ${APP_ID}
+          flatpak run --branch="$BRANCH" --command=chatgpt-fetch "$APP_ID"
 
-          data=~/.var/app/${APP_ID}/data/chatgpt
+          data="$HOME/.var/app/${APP_ID}/data/chatgpt"
           res="$data/resources"
           fail=0
 
@@ -266,7 +270,7 @@ jobs:
           # silently does not exist -- so fail here instead. This is what
           # tells us an Electron bump is actually required, rather than
           # guessing from Renovate's version numbers.
-          loc="$(flatpak --user info --show-location ${APP_ID}//${BRANCH})"
+          loc="$(flatpak --user info --show-location "${APP_ID}//${BRANCH}")"
           target="$(cat "$data/electron-target" 2>/dev/null || true)"
           ours="$(cat "$loc/files/electron/version" 2>/dev/null || true)"
           if [ -z "$target" ] || [ -z "$ours" ]; then
@@ -282,7 +286,7 @@ jobs:
 
           # A second run must be a silent no-op, not another download.
           before="$(cat "$data/version" 2>/dev/null || true)"
-          flatpak run --branch="$BRANCH" --command=chatgpt-fetch ${APP_ID}
+          flatpak run --branch="$BRANCH" --command=chatgpt-fetch "$APP_ID"
           [ "$(cat "$data/version")" = "$before" ] \
             || { echo "ERROR: second fetch changed the payload" >&2; fail=1; }
 

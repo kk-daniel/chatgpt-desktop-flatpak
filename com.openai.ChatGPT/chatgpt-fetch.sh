@@ -342,6 +342,11 @@ ensure_payload() {
     return 0
   fi
 
+  if version_gt "$local_version" "$version"; then
+    echo "OpenAI serves older ChatGPT $version; continuing with installed $local_version" >&2
+    return 0
+  fi
+
   fetch "$version" "$size"
 }
 

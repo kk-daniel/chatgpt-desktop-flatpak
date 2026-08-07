@@ -25,7 +25,7 @@ electron_args=()
 electron_args+=(--password-store=gnome-libsecret)
 
 if [ -n "${WAYLAND_DISPLAY:-}" ] && [ "${ELECTRON_OZONE_PLATFORM_HINT:-wayland}" = "wayland" ]; then
-  electron_args+=(--enable-features=UseOzonePlatform,WaylandWindowDecorations --enable-wayland-ime --wayland-text-input-version=3)
+  electron_args+=("--enable-features=UseOzonePlatform,WaylandWindowDecorations" --enable-wayland-ime --wayland-text-input-version=3)
 fi
 
 if [ -n "${XRDP_SESSION:-}" ]; then
