@@ -226,7 +226,11 @@ unpack() {
   # left for them to catch is a wrong-but-genuine artifact at the end of
   # the URL.
   grep -q 'Name="OpenAI.Codex"' "$manifest" || return 2
-  grep -q 'Publisher="CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B"' "$manifest" || return 2
+  # Same constant as the signature check, not a copy of it: Appx requires
+  # the manifest's Publisher to equal the signing certificate's subject, so
+  # these are one value and a future edit must not be able to move only one
+  # of them. -F because it is an identifier, not a pattern.
+  grep -qF "Publisher=\"$expected_publisher\"" "$manifest" || return 2
 
   # Authoritative version: taken from the bytes on disk rather than the
   # HEAD, which could describe a different build after a republish.
