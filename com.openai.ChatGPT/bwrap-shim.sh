@@ -20,19 +20,28 @@ set -euo pipefail
 log_file="${XDG_CACHE_HOME:-$HOME/.cache}/chatgpt-flatpak/bwrap.log"
 orig_argv=("$@")
 
+# Off unless asked for. Every command Codex runs passes through here and
+# the file has no rotation, so logging by default would grow without bound
+# for the sake of the rare session that needs explaining. Turn it on with
+#
+#   flatpak override --user --env=BWRAP_LOG=1 com.openai.ChatGPT
+#
+# and note that a refusal only reaches stderr otherwise -- which Codex
+# swallows when the command fails.
 log() {
+  [ "${BWRAP_LOG:-}" = 1 ] || return 0
   mkdir -p "${log_file%/*}" 2>/dev/null || return 0
   printf '%s\n' "$*" >> "$log_file" 2>/dev/null || true
 }
 
-# Every invocation is recorded, not just failures: an empty log is itself
-# the answer -- it means Codex never reached this shim, which points at PATH
-# rather than at the translation below.
+# Every invocation is recorded once logging is on, not just the failures:
+# an empty log is itself the answer then -- it means Codex never reached
+# this shim, which points at PATH rather than at the translation below.
 log "CALL[$$] cwd=$(pwd -P 2>/dev/null): $(printf '%q ' "$@")"
 
 # Codex's real command line cannot be read out of its binary, so anything
-# untranslatable is refused loudly and recorded. The log is how the
-# translation table below gets completed.
+# untranslatable is refused loudly, and recorded when the log is on. That
+# log is how the translation table below gets completed.
 refuse() {
   log "REFUSED: $1"
   log "  argv: $(printf '%q ' "${orig_argv[@]}")"

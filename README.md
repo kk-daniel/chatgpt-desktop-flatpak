@@ -124,9 +124,23 @@ seccomp filter. Isolation is preserved rather than disabled.
 This needs **no extra permission**. `--sandbox` goes through the portal and
 can only drop privileges; `--host` would need
 `--talk-name=org.freedesktop.Flatpak` and is a full sandbox escape, which is
-why it is not used. Untranslatable flags are refused outright and logged to
-`~/.var/app/com.openai.ChatGPT/cache/chatgpt-flatpak/bwrap.log` rather than
+why it is not used. Untranslatable flags are refused outright rather than
 silently dropped.
+
+The refusal reaches stderr, which Codex swallows when a command fails, so
+there is a log for the sessions that need explaining — off by default,
+because every command Codex runs passes through the shim and the file has
+no rotation:
+
+```bash
+flatpak override --user --env=BWRAP_LOG=1 com.openai.ChatGPT
+```
+
+Each invocation then appends its original argv, the translated
+`flatpak-spawn` arguments and the rewritten command to
+`~/.var/app/com.openai.ChatGPT/cache/chatgpt-flatpak/bwrap.log`. With it on,
+an empty log is itself an answer: it means Codex never reached the shim,
+which points at `PATH` rather than at the translation.
 
 The two models differ in shape, so the translation is not literal. Codex is
 *subtractive* — bind the whole root read-only, then carve out writable spots
@@ -209,11 +223,13 @@ milliseconds, and the child has no session bus (flatpak disables it for
 That table is also the part CI cannot check. Reaching the portal needs a
 session bus, and the build container has none — `flatpak-spawn` gets as far
 as `Cannot spawn a message bus without a machine-id` and stops. So
-`test-bwrap-shim.sh` asserts the *translation* instead, reading the line the
-shim logs just before it spawns; it covers the parser in its real
-environment but stops at the portal's door. Whether the child is actually
-confined has to be re-measured on a desktop after any change to the
-translation:
+`test-bwrap-shim.sh` asserts the *translation* instead: it runs the
+installed shim with `BWRAP_LOG=1` and compares the line logged just before
+the spawn against the expected arguments. That reaches most of the parser
+in its real environment, but stops at the portal's door — and the flags
+carrying a file descriptor stay out of reach too, since `flatpak run` has
+nowhere to hand one in. Whether the child is actually confined has to be
+re-measured on a desktop after any change to the translation:
 
 ```bash
 flatpak run --command=bwrap com.openai.ChatGPT --unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/sh -c 'echo ok; ls /mnt'

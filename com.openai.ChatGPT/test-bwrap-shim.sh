@@ -3,23 +3,35 @@
 # into `flatpak-spawn --sandbox` arguments.
 #
 # The shim logs the translation just before it spawns, so running the
-# installed shim and reading that log exercises the whole parser in its
-# real environment -- real $HOME, real FLATPAK_ID, real /var/data mapping
-# -- without the portal that would execute the result. The spawn itself
-# then fails wherever no portal is reachable, which is the case in a CI
-# container: it has no session bus, and flatpak-spawn gives up with
+# installed shim with BWRAP_LOG=1 and reading that log exercises the parser
+# in its real environment -- real $HOME, real FLATPAK_ID, real /var/data
+# mapping -- without the portal that would execute the result. The spawn
+# itself then fails wherever no portal is reachable, which is the case in a
+# CI container: it has no session bus, and flatpak-spawn gives up with
 # "Cannot spawn a message bus without a machine-id". Every case therefore
 # ignores the exit status and asserts on the log.
 #
-# What this deliberately does not cover: whether the portal accepts these
-# arguments, and whether the child is actually confined. Both need a
-# desktop session. Check them by hand there with
+# Not covered, so that this file is not mistaken for the whole story:
 #
-#   flatpak run --command=bwrap com.openai.ChatGPT \
-#     --unshare-user --unshare-net --ro-bind / / --chdir / -- \
-#     /bin/sh -c 'echo ok; ls /mnt'
+#   - whether the portal accepts these arguments, and whether the child is
+#     actually confined. Both need a desktop session; check them by hand
+#     there with
 #
-# which must print ok and fail to list /mnt.
+#       flatpak run --command=bwrap com.openai.ChatGPT \
+#         --unshare-user --unshare-net --ro-bind / / --chdir / -- \
+#         /bin/sh -c 'echo ok; ls /mnt'
+#
+#     which must print ok and fail to list /mnt.
+#
+#   - --args, and the --forward-fd derivation that scans the command for
+#     /proc/self/fd/N. Both need a file descriptor open in the shim's own
+#     process, and `flatpak run` has nowhere to hand one in.
+#
+#   - the half of the fallback for a missing --chdir that finds the cwd
+#     under an exposure. `flatpak run` fixes the cwd, so only the half that
+#     falls back to / is reachable here.
+#
+#   - --clearenv.
 set -eu
 
 APP_ID="${APP_ID:-com.openai.ChatGPT}"
@@ -36,9 +48,12 @@ fail=0
 # reason: the shim exposes it when present, and a case that depends on
 # whether Codex has ever run is not a test.
 work="$app/data/shimtest"
+snapshots="$app/.codex/shell_snapshots"
 rm -rf "$work"
-mkdir -p "$work/work/.git" "$work/bin" "$app/.codex/shell_snapshots"
-trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/work/.git" "$work/bin" "$snapshots"
+# rmdir, not rm -rf: it removes the directory only if this script is what
+# created it, and leaves a real Codex session's snapshots alone.
+trap 'rm -rf "$work"; rmdir "$snapshots" 2>/dev/null || true' EXIT
 
 status=0
 run() {
@@ -46,8 +61,8 @@ run() {
   # it would silently be checked against the previous case's translation.
   rm -f "$log"
   status=0
-  flatpak run --branch="$BRANCH" --command=bwrap "$APP_ID" "$@" >/dev/null 2>&1 \
-    || status=$?
+  flatpak run --env=BWRAP_LOG=1 --branch="$BRANCH" --command=bwrap "$APP_ID" "$@" \
+    >/dev/null 2>&1 || status=$?
 }
 
 # The shim logs each argv with `printf '%q '`, so plain arguments come back
@@ -74,6 +89,13 @@ check() {
 # sandbox altogether -- if it fails. Note the missing --chdir: the child
 # inherits a cwd it cannot see unless the shim picks one for it.
 run --unshare-user --unshare-net --ro-bind / / /bin/true
+# Everything below reads the log, so a log that never appeared at all means
+# BWRAP_LOG did not reach the shim -- a broken harness, not a translation
+# that changed. Say which one it is instead of failing every case.
+if [ ! -f "$log" ]; then
+  echo "FAIL: nothing logged to $log -- BWRAP_LOG=1 did not reach the shim" >&2
+  exit 1
+fi
 check "capability probe" \
   "--sandbox --no-network --directory=/ --sandbox-expose-path-ro=$app/.codex/shell_snapshots --sandbox-expose-path-ro=/bin --env=SHIM_ARGV0=/bin/true" \
   "$(logged SPAWN)"
@@ -90,6 +112,12 @@ run --unshare-all --ro-bind / / \
   --chdir /var/data/shimtest/work \
   --argv0 codex \
   -- /var/data/shimtest/bin/tool --flag /var/data/shimtest/work/file
+# --directory is the one path in here left in its in-sandbox form; the
+# exposures and the command's own argv are both rewritten to the host
+# location the portal resolves against. It is pinned the way the shim
+# behaves today, not because that is known to be right -- if the child sees
+# host paths, which rewriting the binary's own path implies, this one is
+# wrong too. Changing it should change this expectation, deliberately.
 check "workspace-write translation" \
   "--sandbox --no-network --sandbox-expose-path=$work/work --sandbox-expose-path-ro=$work/work/.git --env=FOO=bar --unset-env=BAZ --watch-bus --directory=/var/data/shimtest/work --sandbox-expose-path-ro=$app/.codex/shell_snapshots --sandbox-expose-path-ro=$work/bin --env=SHIM_ARGV0=codex" \
   "$(logged SPAWN)"
@@ -133,7 +161,13 @@ check "untranslatable flag refused" "1" "$status"
 # feature-detects on --perms appearing in the help text and rejects the
 # whole shim without it.
 out="$(flatpak run --branch="$BRANCH" --command=bwrap "$APP_ID" --version 2>/dev/null || true)"
-check "--version" "bubblewrap 0.11.0" "$out"
+# The shape is the contract -- callers parse "bubblewrap <version>" -- so
+# match that rather than the number the shim happens to emulate, which is
+# free to move without breaking anyone.
+case "$out" in
+  'bubblewrap '[0-9]*.[0-9]*.[0-9]*) echo "ok: --version" ;;
+  *) echo "FAIL: --version answered '$out'" >&2; fail=1 ;;
+esac
 
 if flatpak run --branch="$BRANCH" --command=bwrap "$APP_ID" --help 2>/dev/null \
      | grep -q -- '--perms'; then
