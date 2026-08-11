@@ -127,6 +127,42 @@ check_electron_drift() {
     "This ChatGPT build targets Electron $declared, but the Flatpak bundles Electron $ours.\n\nAcross a major version Electron removes APIs, so parts of the app may not work. The packaging needs updating."
 }
 
+# @parcel/watcher is absent from the MSIX entirely -- see the manifest. The
+# app imports it by bare specifier from
+# resources/app.asar/.vite/build/worker.js, so node walks node_modules
+# upwards from there and this directory, one level above resources/, is on
+# that path.
+#
+# Deliberately not inside resources/: there it would be destroyed by every
+# payload swap, and a future payload that ships its own @parcel/watcher
+# resolves from resources/ and app.asar first, so ours is shadowed rather
+# than fought over.
+#
+# A symlink, not a copy, so a Flatpak update ships a new module without
+# refetching 700 MB. Never fatal: a failure here costs the watcher, not the
+# launch.
+link_node_modules() {
+  local target=/app/share/chatgpt/node_modules
+  local link="$payload_dir/node_modules"
+
+  [ -d "$target" ] || return 0
+
+  # Nested rather than `[ ... ] && return 0`, which under errexit reads as a
+  # deliberate fall-through only if you know the && exemption by heart.
+  if [ -L "$link" ]; then
+    if [ "$(readlink "$link" 2>/dev/null)" = "$target" ]; then
+      return 0
+    fi
+    # Ours but stale -- ln -n replaces the link itself, not its target.
+  elif [ -e "$link" ]; then
+    # A real directory is not ours to replace.
+    return 0
+  fi
+
+  ln -sfn "$target" "$link" 2>/dev/null || true
+  return 0
+}
+
 # errexit does NOT apply inside this function: both call sites test its
 # status (`if unpack` / `unpack || rc=$?`), which suspends errexit for the
 # whole dynamic extent. Every failure that matters must be checked by hand
@@ -358,6 +394,8 @@ exec 9>"$lock_file"
 flock 9
 
 ensure_payload
-# Outside ensure_payload: drift can appear because the Flatpak's Electron
-# moved, not because the payload did.
+# Both outside ensure_payload: drift can appear because the Flatpak's
+# Electron moved, not because the payload did, and the link has to be
+# re-checked on a payload that was already installed by an earlier build.
 check_electron_drift
+link_node_modules

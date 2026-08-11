@@ -213,6 +213,27 @@ jobs:
           [ -s "$loc/files/share/chatgpt/expected-version" ] \
             || { echo "ERROR: expected-version missing or empty" >&2; fail=1; }
 
+          # Unlike the two natives above this one is not swapped into the
+          # payload but resolved out of /app, so the whole package has to be
+          # here -- a missing dependency only shows up as a failed import at
+          # run time.
+          mods="$loc/files/share/chatgpt/node_modules"
+          if [ ! -f "$mods/@parcel/watcher/build/Release/watcher.node" ]; then
+            echo "ERROR: @parcel/watcher not built" >&2
+            fail=1
+          elif ! is_elf "$mods/@parcel/watcher/build/Release/watcher.node"; then
+            echo "ERROR: not a Linux ELF binary: watcher.node" >&2
+            fail=1
+          fi
+
+          for f in @parcel/watcher/index.js @parcel/watcher/wrapper.js \
+                   @parcel/watcher/package.json detect-libc picomatch \
+                   is-glob is-extglob
+          do
+            [ -e "$mods/$f" ] \
+              || { echo "ERROR: @parcel/watcher tree incomplete: $f" >&2; fail=1; }
+          done
+
           [ "$fail" -eq 0 ] && echo "Build output looks sane"
           exit "$fail"
 
@@ -283,6 +304,44 @@ jobs:
           elif [ "$target" != "$ours" ]; then
             echo "note: payload targets Electron $target, bundling $ours (same major)"
           fi
+
+          # The payload has no @parcel/watcher, so the app reaches ours by
+          # walking node_modules up out of app.asar. Check the link, then
+          # prove the whole chain works from a file sitting where the app's
+          # worker does: bare specifier resolved, native binding loaded, and
+          # inotify actually delivering events inside the sandbox. A named
+          # import, because the app destructures the namespace it gets from
+          # `await import(...)`.
+          [ "$(readlink "$data/node_modules" || true)" = "/app/share/chatgpt/node_modules" ] \
+            || { echo "ERROR: node_modules link missing beside the payload" >&2; fail=1; }
+
+          cat > "$data/parcel-probe.mjs" <<'PROBE'
+          import {subscribe} from '@parcel/watcher';
+          import {mkdtemp, writeFile} from 'node:fs/promises';
+          import {tmpdir} from 'node:os';
+          import {join} from 'node:path';
+
+          const dir = await mkdtemp(join(tmpdir(), 'watch-'));
+          const events = [];
+          const sub = await subscribe(dir, (err, evs) => {
+            if (!err) events.push(...evs);
+          }, {backend: 'inotify'});
+
+          await new Promise(r => setTimeout(r, 500));
+          await writeFile(join(dir, 'probe.txt'), 'x');
+          await new Promise(r => setTimeout(r, 2000));
+          await sub.unsubscribe();
+
+          if (!events.some(e => e.path.endsWith('probe.txt'))) {
+            console.error('no inotify events delivered');
+            process.exit(1);
+          }
+          console.log(`@parcel/watcher resolved and delivered ${events.length} event(s)`);
+          PROBE
+          flatpak run --branch="$BRANCH" --command=node "$APP_ID" \
+            /var/data/chatgpt/parcel-probe.mjs \
+            || { echo "ERROR: @parcel/watcher unusable in the sandbox" >&2; fail=1; }
+          rm -f "$data/parcel-probe.mjs"
 
           # A second run must be a silent no-op, not another download.
           before="$(cat "$data/version" 2>/dev/null || true)"

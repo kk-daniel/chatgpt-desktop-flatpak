@@ -148,6 +148,15 @@ modules:
   # Isolate* parameter) and does not compile. The lib/*.js of 12.9.0 and
   # 12.11.1 are byte-identical, so only the compiled binary is swapped in
   # and the JavaScript the app loads is untouched.
+  #
+  # @parcel/watcher is a different case: not a Windows build to replace but
+  # a package the MSIX does not contain at all. The app's file watcher does
+  # `await import("@parcel/watcher")` with a hardcoded `backend: "inotify"`,
+  # so that branch is Linux-only and a Windows package has no reason to
+  # carry it. Left missing, every repo watch dies with ERR_MODULE_NOT_FOUND
+  # and the app never notices changes on disk. Installed whole rather than
+  # swapped in, and reached through node_modules resolution -- see
+  # link_node_modules in chatgpt-fetch.
   - name: native-modules
     buildsystem: simple
     build-options:
@@ -163,11 +172,28 @@ modules:
         (cd better-sqlite3 && node "$nodegyp" rebuild --release --force_build=1
         --arch="$arch" --nodedir="$headers") &&
         (cd node-pty && node "$nodegyp" rebuild --release
+        --arch="$arch" --nodedir="$headers") &&
+        (cd parcel-watcher && node "$nodegyp" rebuild --release
         --arch="$arch" --nodedir="$headers")
       - install -Dm644 better-sqlite3/build/Release/better_sqlite3.node
         /app/share/chatgpt/native/better_sqlite3.node
       - install -Dm644 node-pty/build/Release/pty.node
         /app/share/chatgpt/native/pty.node
+      # index.js finds this on its own: the require of the prebuilt
+      # @parcel/watcher-linux-$arch-glibc package misses, which it treats as
+      # non-fatal, and falls through to ./build/Release/watcher.node. src/
+      # and the rest of the build tree are build-time only.
+      - install -Dm755 parcel-watcher/build/Release/watcher.node
+        /app/share/chatgpt/node_modules/@parcel/watcher/build/Release/watcher.node
+      - install -Dm644 -t /app/share/chatgpt/node_modules/@parcel/watcher
+        parcel-watcher/index.js parcel-watcher/wrapper.js
+        parcel-watcher/package.json parcel-watcher/LICENSE
+      # Siblings, not nested: resolution from @parcel/watcher/index.js skips
+      # the node_modules it already sits in and lands on this directory.
+      - for dep in detect-libc picomatch is-glob is-extglob; do
+        mkdir -p "/app/share/chatgpt/node_modules/$dep" &&
+        cp -a "$dep/." "/app/share/chatgpt/node_modules/$dep/" || exit 1;
+        done
     sources:
       - type: archive
         url: https://artifacts.electronjs.org/headers/dist/v42.3.0/node-v42.3.0-headers.tar.gz
@@ -188,6 +214,35 @@ modules:
         url: https://registry.npmjs.org/node-addon-api/-/node-addon-api-8.9.0.tgz
         sha256: 19b87e2ce3a77fec0121ac97d7db088aae28aacfff481adab50d5f61b70e68f4
         dest: node-pty/node_modules/node-addon-api
+      - type: archive
+        url: https://registry.npmjs.org/@parcel/watcher/-/watcher-2.6.0.tgz
+        sha256: ab42807be3df24a12d01e31568a7e61def1a4bee636a7c60a397319eff677e95
+        dest: parcel-watcher
+      # Same binding.gyp trick as node-pty, but 7.x: @parcel/watcher declares
+      # node-addon-api ^7.0.0, so it does not get the 8.9.0 above.
+      - type: archive
+        url: https://registry.npmjs.org/node-addon-api/-/node-addon-api-7.1.1.tgz
+        sha256: b10455d15a977c0cd17a1cb0eb679e03d939f8ef8d4302eb33e1f78dacc71f82
+        dest: parcel-watcher/node_modules/node-addon-api
+      # Run-time dependencies of @parcel/watcher: index.js requires
+      # detect-libc, wrapper.js requires picomatch and is-glob, and is-glob
+      # requires is-extglob. Nothing here is compiled.
+      - type: archive
+        url: https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz
+        sha256: 270dec0fc06cff86481da8af2dd8f18dee6b602790b14ef0e1c2c18d7da39427
+        dest: detect-libc
+      - type: archive
+        url: https://registry.npmjs.org/picomatch/-/picomatch-4.0.5.tgz
+        sha256: e89c478225a42b3793bb4a39fd576de142c9829c26a5bd71782249e48b112f51
+        dest: picomatch
+      - type: archive
+        url: https://registry.npmjs.org/is-glob/-/is-glob-4.0.3.tgz
+        sha256: 3fe453fb193bb58f6f0505dfb1151230935380b5b55e1f9864261c2aafc1bec6
+        dest: is-glob
+      - type: archive
+        url: https://registry.npmjs.org/is-extglob/-/is-extglob-2.1.1.tgz
+        sha256: 8c5d4286146ad62fc1096981700ce1c22a167708926fca01f9ca74f9bb50bc19
+        dest: is-extglob
 
   # No extra-data source: OpenAI serves the package only from a mutable
   # "latest" URL, so any sha256 pinned here would go stale on their next

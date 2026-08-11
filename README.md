@@ -49,7 +49,7 @@ from OpenAI on **first launch**, not at install time — see below.
 
 ## The parts that need work on Linux
 
-Three things are wrong with the official payload on Linux:
+Four things are wrong with the official payload on Linux:
 
 **Native modules are Windows DLLs.** `better-sqlite3` and `node-pty` ship as
 PE binaries. Left alone the app starts and then fails every session store
@@ -61,6 +61,32 @@ The manifest pins `better-sqlite3` **12.11.1**, not the 12.9.0 the app
 declares: 12.9.0 predates the V8 `External::Value()` signature change in
 Electron 42 and does not compile. Its `lib/*.js` is byte-identical to
 12.9.0's, so only the compiled binary differs from what the app expects.
+
+**One Linux-only module is missing outright.** The app's file watcher does
+`await import("@parcel/watcher")` with a hardcoded `backend: "inotify"` — a
+branch only Linux ever takes, so the Windows package has no reason to carry
+it, and does not: it is in neither `app.asar` nor `app.asar.unpacked`. Left
+alone, every watch dies at startup with
+
+```
+[git-repo-watcher] Failed to watch git path errorCode=ERR_MODULE_NOT_FOUND
+  Cannot find package '@parcel/watcher' imported from
+  /var/data/chatgpt/resources/app.asar/.vite/build/worker.js
+```
+
+and the app never notices changes made on disk — a git branch switched, or a
+file written by anything other than the app itself.
+
+Unlike the two above, there is nothing to swap: the `native-modules` module
+compiles `@parcel/watcher` against the same pinned Electron headers and
+installs it whole, with its four runtime dependencies, into
+`/app/share/chatgpt/node_modules`. `chatgpt-fetch` then symlinks that into
+the payload directory, one level above `resources/`, which is the next place
+node looks when it walks `node_modules` upwards from
+`resources/app.asar/.vite/build/worker.js`. Sitting *outside* `resources/`
+means it survives a payload refresh and stays clear of the swap — and if a
+future payload ever ships its own copy, that one resolves first and this
+becomes dead weight rather than a conflict.
 
 **MSIX percent-encodes path names.** Scoped npm packages arrive as
 `%40scope`, so `require('@scope/pkg')` misses. `chatgpt-fetch` decodes the
