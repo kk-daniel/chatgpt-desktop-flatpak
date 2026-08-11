@@ -17,8 +17,21 @@ does not lift them either. Left alone, every sandboxed command fails.
 
 `/app/bin/bwrap` is a shim that takes bubblewrap's place on `PATH` (Codex
 looks there before falling back to its bundled copy) and re-expresses the
-request as `flatpak-spawn --sandbox`, which the portal runs outside our
-seccomp filter. Isolation is preserved rather than disabled.
+request as `flatpak-spawn --sandbox`. The portal builds that sandbox on the
+host, with privileges the app does not have, and hands back a confined
+child — so the isolation Codex asked for is preserved rather than disabled.
+
+The child is **not** outside the seccomp filter, and it is worth being
+precise about that because it rules out the obvious alternative. Measured:
+
+```bash
+flatpak run --command=sh com.openai.ChatGPT -c 'cd /; flatpak-spawn --sandbox --directory=/ /bin/sh -c "unshare --user --map-root-user true"'
+```
+
+fails with `Operation not permitted`, exactly as it does in the app itself.
+Nothing anywhere in this chain can create a user namespace. So bubblewrap
+cannot be relocated into the portal child and run there unchanged; the
+request has to be translated, which is what follows.
 
 This needs **no extra permission**. `--sandbox` goes through the portal and
 can only drop privileges; `--host` would need
@@ -90,6 +103,44 @@ in POSIX mode, where a failed `.` is a special-builtin error that kills the
 shell outright -- inside the `if` the script wraps it in, and with the error
 redirected to `/dev/null`. A missing snapshot therefore exits 1 with no
 output at all.
+
+### The command Codex actually asked for
+
+What Codex hands bwrap is not the command it wants run. It is its own
+helper, re-executed under `argv[0]` `codex-linux-sandbox`, with the real
+command after a second `--`. By that point the helper's remaining job is to
+apply seccomp and exec — the mounts were asked for in the bwrap flags, and
+those flags are the permission profile written in bubblewrap's terms.
+
+The helper cannot run on this side, in two independent ways. It re-execs
+through file descriptors the portal does not carry, which surfaces as
+`--bind-fd: Not an open file descriptor: 15` from a bare `pwd`. And its
+Landlock fallback, which `features.use_legacy_landlock = true` selects,
+panics rather than enforce something other than what was asked:
+
+```
+permission profiles requiring direct runtime enforcement are
+incompatible with --use-legacy-landlock
+```
+
+The desktop app's profile trips that check — protected `.git`, `.agents`
+and `.codex` names, `missing_path_behavior: skip`, and a writable root
+outside the workspace — and the profile's shape is the app's to choose,
+not ours.
+
+So the shim drops the helper and runs the command it was wrapping. The
+policy does not go with it: the same bwrap flags the helper would have
+enforced are portal exposures by then, and `--unshare-net` is already
+`--no-network`. What is lost is Codex's seccomp network filter layered on
+top of the network namespace — two mechanisms for one boundary reduced to
+one. Proxy mode is the exception and is refused outright, since it bridges
+the child's traffic through a listener the shim plays no part in.
+
+The recognition is deliberately narrow: `argv[0]` must be
+`codex-linux-sandbox`, and the command must contain
+`--apply-seccomp-then-exec` followed by `--`. Anything else passes through
+untouched, so a change upstream breaks loudly instead of quietly running a
+command with less around it than Codex believes.
 
 ## What the child can actually reach
 

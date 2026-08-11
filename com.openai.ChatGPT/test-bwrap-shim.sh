@@ -127,6 +127,36 @@ check "workspace-write command rewrite" \
   "$work/bin/tool --flag $work/work/file" \
   "$(logged EXEC)"
 
+# Codex does not hand bwrap the command it wants run. It hands its own
+# helper, re-executed under argv[0] codex-linux-sandbox, with the real
+# command after a second --. The helper cannot run on this side: it
+# re-execs through descriptors the portal does not carry, and its Landlock
+# fallback refuses outright any profile whose semantics it cannot
+# reproduce. So it is dropped and the inner command runs directly. The
+# policy does not go with it -- the exposures asserted here come from the
+# same bwrap flags Codex built out of the permission profile.
+run --new-session --die-with-parent --ro-bind / / --dev /dev \
+  --bind /var/data/shimtest/work /var/data/shimtest/work \
+  --ro-bind /var/data/shimtest/work/.git /var/data/shimtest/work/.git \
+  --unshare-user --unshare-pid --unshare-net --proc /proc \
+  --argv0 codex-linux-sandbox \
+  -- /var/data/shimtest/bin/tool --sandbox-policy-cwd /var/data/shimtest/work \
+     --command-cwd /var/data/shimtest/work \
+     --permission-profile '{"type":"managed"}' \
+     --apply-seccomp-then-exec -- /bin/sh -c true
+check "codex helper dropped" \
+  "--sandbox --watch-bus --sandbox-expose-path=$work/work --sandbox-expose-path-ro=$work/work/.git --no-network --directory=$work/work --sandbox-expose-path-ro=$app/.codex/shell_snapshots --sandbox-expose-path-ro=/bin --env=SHIM_ARGV0=/bin/sh" \
+  "$(logged SPAWN)"
+check "codex helper inner command runs" "/bin/sh -c true" "$(logged EXEC)"
+
+# Proxy mode does more than filter: it bridges the child's traffic through
+# a listener the shim plays no part in. Dropping the helper there would
+# drop the network policy with it, so the whole call is refused instead.
+run --ro-bind / / --unshare-net --chdir / --argv0 codex-linux-sandbox \
+  -- /var/data/shimtest/bin/tool --allow-network-for-proxy \
+     --apply-seccomp-then-exec -- /bin/true
+check "codex helper proxy mode refused" "1" "$status"
+
 # /tmp is a per-instance tmpfs the portal will not expose, and the child
 # gets a fresh private one regardless. Asking for it is dropped rather
 # than refused, or every sandboxed command Codex runs would fail.

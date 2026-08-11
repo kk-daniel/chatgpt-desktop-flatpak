@@ -274,6 +274,52 @@ done
 cmd=("${argv[@]:i}")
 [ "${#cmd[@]}" -gt 0 ] || refuse "no command after the bwrap flags"
 
+# What Codex hands bwrap is not the command it wants run: it is its own
+# helper, re-executed under argv[0] codex-linux-sandbox, with the real
+# command after a second `--`. By that point the helper's remaining job is
+# to apply seccomp and exec -- the mounts were asked for in the bwrap flags
+# above, and those flags are the permission profile written in bwrap's
+# terms. They are exactly what this script has already turned into portal
+# exposures, so the helper is a second enforcement pass over a policy the
+# portal is applying anyway.
+#
+# And it is one that cannot run here. It re-execs through descriptors the
+# portal does not carry, which is the "--bind-fd: Not an open file
+# descriptor" failure, and its Landlock fallback refuses outright any
+# profile whose semantics it cannot reproduce exactly. Neither is
+# reachable from this side.
+#
+# So run what Codex actually asked for. Recognised narrowly, and anything
+# that does not match this exact shape is passed through untouched.
+if [ "$argv0" = "codex-linux-sandbox" ]; then
+  helper=0 sep=-1 command_cwd=""
+  for j in "${!cmd[@]}"; do
+    case "${cmd[j]}" in
+      --apply-seccomp-then-exec) helper=1 ;;
+      --command-cwd) command_cwd="${cmd[j+1]:-}" ;;
+      # Proxy mode does more than filter: it bridges the child's traffic
+      # through a listener this script plays no part in. Running the
+      # command without it would drop the network policy silently.
+      --allow-network-for-proxy|--proxy-route-spec)
+        refuse "codex-linux-sandbox ${cmd[j]} (proxy mode cannot be reproduced)" ;;
+      --) [ "$helper" -eq 1 ] && [ "$sep" -lt 0 ] && sep=$j ;;
+    esac
+  done
+  if [ "$helper" -eq 1 ] && [ "$sep" -ge 0 ]; then
+    cmd=("${cmd[@]:sep+1}")
+    [ "${#cmd[@]}" -gt 0 ] || refuse "nothing after --apply-seccomp-then-exec --"
+    # The helper was going to run this under its own name, not ours.
+    argv0="${cmd[0]}"
+    # It is also told the cwd separately, and that is the authority: it can
+    # differ from the policy cwd when the workspace is reached by symlink.
+    if [ -n "$command_cwd" ]; then
+      spawn+=("--directory=$(host_path "$command_cwd")")
+      have_chdir=1
+    fi
+    log "HELPER[$$]: codex-linux-sandbox dropped, running its inner command"
+  fi
+fi
+
 # Without --chdir, bwrap keeps the current directory -- but the child only
 # sees what we exposed, so an unexposed cwd makes flatpak-spawn fail with
 # "Can't chdir". That is what breaks Codex's capability probe, which runs
@@ -289,6 +335,14 @@ if [ "$have_chdir" -eq 0 ]; then
 fi
 
 # Any fd the command still refers to has to survive the portal hop.
+#
+# Only the ones named in the command. Forwarding everything inherited was
+# tried and reverted: it does not reach the descriptors Codex's helper
+# wants -- those are not inherited at all, as the log below shows -- and
+# when the app's own process calls in it inherits some seventy, sockets to
+# the session bus and the display among them, which the portal would then
+# hand to a sandboxed command. That is the one direction this shim must
+# never move in.
 fds=()
 for word in "${cmd[@]}"; do
   while IFS= read -r m; do
