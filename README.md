@@ -7,6 +7,10 @@ documents for enterprise deployment — around a stock Linux Electron, in the
 spirit of [johnohhh1/chatgpt_desktop_ubuntu](https://github.com/johnohhh1/chatgpt_desktop_ubuntu),
 which does the equivalent as a `.deb`.
 
+One deviation is worth knowing before you install: **Codex's own sandbox
+cannot run inside a Flatpak, and this package substitutes its own
+arrangement for it.** See [Sandboxing](#sandboxing).
+
 ## What is actually inside the package
 
 Worth knowing before you build: the Windows "ChatGPT" package is now the
@@ -108,12 +112,28 @@ session databases, stored on the host at
 host-installed `codex` CLI — the two keep separate configuration and
 history. Files reach the app through the file-chooser portal.
 
-Codex isolates every command it runs with bubblewrap, which needs the
-namespace syscalls Flatpak's seccomp policy denies outright, so
-`/app/bin/bwrap` re-expresses those calls as `flatpak-spawn --sandbox`
-instead. That translation, what the sandboxed child can actually reach, and
-how to grant the agent a directory to work in are in
-[SANDBOXING.md](SANDBOXING.md).
+> [!IMPORTANT]
+> **Codex's own sandbox does not run here. This package replaces it.**
+>
+> Codex isolates every command it runs with **bubblewrap**, which needs
+> user namespaces — and nothing inside a Flatpak can create one, not the
+> app and not the portal's children either. Its Landlock fallback refuses
+> the profile the desktop app builds. So neither of Codex's two enforcement
+> backends works, and every sandboxed command failed outright.
+>
+> Instead, `/app/bin/bwrap` takes bubblewrap's place on `PATH`, translates
+> the request into `flatpak-spawn --sandbox`, and **drops Codex's own
+> sandbox helper**, running the command the helper was wrapping. The
+> requested policy is preserved — it is carried by the same bwrap flags the
+> shim turns into portal exposures — but it is the **Flatpak portal, not
+> Codex, that enforces it**, and one layer is genuinely gone: Codex's
+> seccomp network filter on top of the network namespace.
+>
+> Read [SANDBOXING.md](SANDBOXING.md) before trusting this with anything
+> you would not hand a process confined only by this Flatpak. It documents
+> what the sandboxed child can actually reach, where the translation is
+> less faithful than bubblewrap, and how to grant the agent a directory to
+> work in.
 
 ## Why the payload is fetched at first launch
 
