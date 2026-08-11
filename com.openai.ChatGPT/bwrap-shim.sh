@@ -20,19 +20,28 @@ set -euo pipefail
 log_file="${XDG_CACHE_HOME:-$HOME/.cache}/chatgpt-flatpak/bwrap.log"
 orig_argv=("$@")
 
+# Off unless asked for. Every command Codex runs passes through here and
+# the file has no rotation, so logging by default would grow without bound
+# for the sake of the rare session that needs explaining. Turn it on with
+#
+#   flatpak override --user --env=BWRAP_LOG=1 com.openai.ChatGPT
+#
+# and note that a refusal only reaches stderr otherwise -- which Codex
+# swallows when the command fails.
 log() {
+  [ "${BWRAP_LOG:-}" = 1 ] || return 0
   mkdir -p "${log_file%/*}" 2>/dev/null || return 0
   printf '%s\n' "$*" >> "$log_file" 2>/dev/null || true
 }
 
-# Every invocation is recorded, not just failures: an empty log is itself
-# the answer -- it means Codex never reached this shim, which points at PATH
-# rather than at the translation below.
+# Every invocation is recorded once logging is on, not just the failures:
+# an empty log is itself the answer then -- it means Codex never reached
+# this shim, which points at PATH rather than at the translation below.
 log "CALL[$$] cwd=$(pwd -P 2>/dev/null): $(printf '%q ' "$@")"
 
 # Codex's real command line cannot be read out of its binary, so anything
-# untranslatable is refused loudly and recorded. The log is how the
-# translation table below gets completed.
+# untranslatable is refused loudly, and recorded when the log is on. That
+# log is how the translation table below gets completed.
 refuse() {
   log "REFUSED: $1"
   log "  argv: $(printf '%q ' "${orig_argv[@]}")"
@@ -196,7 +205,7 @@ expose() {
 # `--perms 555 --tmpfs X --remount-ro X`. A nested read-only exposure
 # overrides a writable parent, so this preserves the part that matters --
 # the agent cannot write X. It does not hide X's contents the way an empty
-# tmpfs does; that difference is documented in the README.
+# tmpfs does; that difference is documented in SANDBOXING.md.
 mask() {
   local path="$1"
   case "$path" in /|/tmp|/tmp/*) return 0 ;; esac
@@ -320,11 +329,8 @@ case "${cmd[0]}" in
   /*) expose --sandbox-expose-path-ro "$(dirname -- "${cmd[0]}")" "$(dirname -- "${cmd[0]}")" try ;;
 esac
 
-# Exposures land at their host paths, but the command refers to the
-# in-sandbox names. The child's / is a fresh tmpfs, so those names are
-# recreated as symlinks and the command's own argv is left untouched --
-# which matters, because paths also appear inside the shell script Codex
-# passes to `sh -c`, where rewriting would be guesswork.
+# The rewrite above already put cmd[0] in its host form, so this picks up
+# the name the child will actually be told to run.
 [ -n "$argv0" ] || argv0="${cmd[0]}"
 
 # The only thing still wrapped: flatpak-spawn has no --argv0, and Codex
@@ -334,6 +340,11 @@ setup='exec -a "$SHIM_ARGV0" "$@"'
 spawn+=("--env=SHIM_ARGV0=$argv0")
 
 log "SPAWN[$$]: $(printf '%q ' "${spawn[@]}")"
+# The rewritten command as well as the sandbox flags. When a path inside
+# the script Codex hands to `sh -c` comes out wrong, this is the only place
+# the final form is visible -- and logging it before the portal call is
+# what lets the translation be tested where no portal exists.
+log "EXEC[$$]: $(printf '%q ' "${cmd[@]}")"
 
 # Run rather than exec, so a failure gets an exit code and any output
 # recorded. Codex swallows the child's stderr when the command fails, which
