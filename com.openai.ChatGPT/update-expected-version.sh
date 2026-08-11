@@ -27,6 +27,14 @@ if [ -z "$remote_version" ]; then
   exit 1
 fi
 
+# The version oracle publishes this same value for Renovate to read, and
+# reading the header is the whole of it -- so that workflow calls this
+# rather than growing a second copy of the curl and the awk.
+if [ "${1:-}" = "--print" ]; then
+  printf '%s\n' "$remote_version"
+  exit 0
+fi
+
 current="$(cat "$expected_file" 2>/dev/null || echo "")"
 
 if [ "$current" = "$remote_version" ]; then
