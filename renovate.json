@@ -46,13 +46,13 @@
         "/\\/com\\.openai\\.ChatGPT\\.yaml$/"
       ],
       "matchStrings": [
-        "url: https://github\\.com/ip7z/7zip/releases/download/(?<currentValue>[\\d.]+)/7z\\d+-linux-(?<arch>x64|arm64)\\.tar\\.xz"
+        "url: https://github\\.com/ip7z/7zip/releases/download/(?<currentValue>[\\d.]+)/7z\\d+-linux-"
       ],
       "depNameTemplate": "7zip",
       "packageNameTemplate": "ip7z/7zip",
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "loose",
-      "autoReplaceStringTemplate": "url: https://github.com/ip7z/7zip/releases/download/{{{newValue}}}/7z{{{replace '\\.' '' newValue}}}-linux-{{{arch}}}.tar.xz"
+      "autoReplaceStringTemplate": "url: https://github.com/ip7z/7zip/releases/download/{{{newValue}}}/7z{{{replace '\\.' '' newValue}}}-linux-"
     },
     {
       "customType": "regex",
@@ -61,12 +61,12 @@
         "/\\/com\\.openai\\.ChatGPT\\.yaml$/"
       ],
       "matchStrings": [
-        "url: https://github\\.com/electron/electron/releases/download/v(?<currentValue>[\\d.]+)/electron-v[\\d.]+-linux-(?<arch>x64|arm64)\\.zip"
+        "url: https://github\\.com/electron/electron/releases/download/v(?<currentValue>[\\d.]+)/electron-v[\\d.]+-linux-"
       ],
       "depNameTemplate": "electron",
       "datasourceTemplate": "npm",
       "versioningTemplate": "npm",
-      "autoReplaceStringTemplate": "url: https://github.com/electron/electron/releases/download/v{{{newValue}}}/electron-v{{{newValue}}}-linux-{{{arch}}}.zip"
+      "autoReplaceStringTemplate": "url: https://github.com/electron/electron/releases/download/v{{{newValue}}}/electron-v{{{newValue}}}-linux-"
     },
     {
       "customType": "regex",
