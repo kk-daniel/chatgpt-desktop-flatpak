@@ -244,12 +244,39 @@ modules:
         sha256: 8c5d4286146ad62fc1096981700ce1c22a167708926fca01f9ca74f9bb50bc19
         dest: is-extglob
 
+  # Verifies the MSIX signature before chatgpt-fetch unpacks anything.
+  # Nothing else on Linux computes the Appx digests, which is what binds a
+  # signature to the bytes rather than to a claim inside them.
+  #
+  # Patched, because it cannot verify a Microsoft Store package as it
+  # ships: Store leaf certificates carry a critical Application Policies
+  # extension OpenSSL does not parse, so the chain is rejected before the
+  # digests are ever compared. The patch tolerates that one extension and
+  # only when nothing else on the certificate is unparsed.
+  #
+  # Pinned to a release rather than tracking master: this is the one
+  # component whose behaviour a silent change could turn into an
+  # authenticity check that passes when it should not.
+  - name: osslsigncode
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DENABLE_TESTS=OFF
+    sources:
+      - type: archive
+        url: https://github.com/mtrojnar/osslsigncode/archive/refs/tags/2.14.tar.gz
+        sha256: 0f033fd6069387d2e489fbd2187e62f624764eb8c2758ee94e3e793e5150b5c5
+      - type: patch
+        path: osslsigncode-ms-app-policies.patch
+
   # No extra-data source: OpenAI serves the package only from a mutable
   # "latest" URL, so any sha256 pinned here would go stale on their next
   # release and break every fresh install until re-pinned. chatgpt-fetch
-  # pulls it on first launch instead. expected-version records the build
-  # this packaging was tested against, and is what chatgpt-fetch compares
-  # the installed payload against to decide whether to warn or refresh.
+  # pulls it on first launch instead, and verifies its signature rather
+  # than a digest -- authenticity survives the version churn a pinned hash
+  # cannot. expected-version records the build this packaging was tested
+  # against, and is what chatgpt-fetch compares the installed payload
+  # against to decide whether to warn or refresh.
   - name: chatgpt
     buildsystem: simple
     build-commands:
@@ -261,6 +288,7 @@ modules:
       # `flatpak-spawn --sandbox`, which needs no extra permission.
       - install -Dm755 bwrap-shim.sh /app/bin/bwrap
       - install -Dm644 expected-version /app/share/chatgpt/expected-version
+      - install -Dm644 microsoft-roots.pem /app/share/chatgpt/microsoft-roots.pem
       - install -Dm644 ${FLATPAK_ID}.metainfo.xml -t /app/share/metainfo
       - install -Dm644 ${FLATPAK_ID}.desktop -t /app/share/applications
       - install -Dm644 ${FLATPAK_ID}-url-handler.desktop -t /app/share/applications
@@ -284,6 +312,8 @@ modules:
         path: bwrap-shim.sh
       - type: file
         path: expected-version
+      - type: file
+        path: microsoft-roots.pem
       - type: file
         path: com.openai.ChatGPT.metainfo.xml
       - type: file

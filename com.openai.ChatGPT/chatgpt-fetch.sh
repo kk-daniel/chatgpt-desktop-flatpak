@@ -14,6 +14,10 @@ electron_warned_file="$payload_dir/warned-electron"
 lock_file="$payload_dir/.lock"
 expected_file=/app/share/chatgpt/expected-version
 base_url=https://persistent.oaistatic.com/codex-app-prod
+# OpenAI's Microsoft Store publisher identity. The signing certificate is
+# reissued every few days, but this subject is stable across them, and it
+# is what separates "signed by a Store publisher" from "signed by OpenAI".
+expected_publisher='CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B'
 
 case "$(uname -m)" in
   x86_64) msix_name=ChatGPT-x64.msix ;;
@@ -163,6 +167,46 @@ link_node_modules() {
   return 0
 }
 
+# The one thing that ties these bytes to OpenAI. Everything the archive
+# says about itself -- the package name in its manifest, the publisher CN
+# -- is inside the archive, so a substituted payload says the same thing
+# just as convincingly. The signature is checked against roots shipped
+# with this Flatpak, which is the part a substituted payload cannot reach.
+#
+# The Store signs with a certificate that lives three days and timestamps
+# the signature, so verification is done at signing time and the expired
+# leaf is expected. Only the roots are pinned; they run to 2035 and 2036.
+#
+# A valid chain only proves some Store publisher signed this. Binding it
+# to OpenAI needs the signer's identity, taken from the verified
+# certificate rather than from the manifest inside the archive -- the
+# whole point being that the archive cannot be its own witness.
+#
+# 124 is timeout's, and it means the revocation lists could not be
+# fetched rather than that the package is bad -- a distinction worth
+# keeping, because the two call for different things from the user.
+verify_signature() {
+  local msix="$1" roots=/app/share/chatgpt/microsoft-roots.pem
+  local out rc=0 signer
+
+  [ -f "$roots" ] || return 3
+
+  out="$(timeout 180 osslsigncode verify \
+           -in "$msix" -CAfile "$roots" -TSA-CAfile "$roots" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$out" | tail -n 25 >&2
+    return "$rc"
+  fi
+
+  signer="$(printf '%s\n' "$out" \
+    | awk "/^Signer's certificate:/ {f=1; next} f && /Subject:/ {sub(/.*Subject: /, \"\"); print; exit}")"
+  if [ "$signer" != "$expected_publisher" ]; then
+    printf 'signed by %s, expected %s\n' "${signer:-<none>}" "$expected_publisher" >&2
+    return 4
+  fi
+  return 0
+}
+
 # errexit does NOT apply inside this function: both call sites test its
 # status (`if unpack` / `unpack || rc=$?`), which suspends errexit for the
 # whole dynamic extent. Every failure that matters must be checked by hand
@@ -177,9 +221,10 @@ unpack() {
   local manifest="$pkg/AppxManifest.xml"
   [ -f "$manifest" ] || return 1
 
-  # Not signature verification -- these are greps over bytes that came out
-  # of the archive under test. It catches a wrong or truncated artifact at
-  # the end of the URL, nothing adversarial.
+  # Sanity, not authenticity: verify_signature settled that before this
+  # ran, against the signer's certificate rather than these bytes. What is
+  # left for them to catch is a wrong-but-genuine artifact at the end of
+  # the URL.
   grep -q 'Name="OpenAI.Codex"' "$manifest" || return 2
   grep -q 'Publisher="CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B"' "$manifest" || return 2
 
@@ -308,6 +353,17 @@ fetch() {
     curl -fL "${curl_opts[@]}" --progress-bar "$url" -o "$msix" \
       || die "Download failed.\n\nCheck your network connection and try again."
   fi
+
+  echo "Verifying signature..." >&2
+  local vrc=0
+  verify_signature "$msix" || vrc=$?
+  case "$vrc" in
+    0) ;;
+    3) die "This ChatGPT Flatpak is missing its signing trust anchors.\n\nThe package cannot be verified, so it will not be installed. Reinstall the Flatpak." ;;
+    4) die "The downloaded package is signed, but not by OpenAI.\n\nRefusing to install it." ;;
+    124) die "Could not finish verifying OpenAI's signature on the download.\n\nThe revocation lists could not be fetched within the time limit. This is usually a network problem rather than a bad package.\n\nCheck your connection and try again." ;;
+    *) die "The downloaded package is not signed by OpenAI, or the signature does not match its contents.\n\nRefusing to install it." ;;
+  esac
 
   echo "Unpacking..." >&2
   local rc=0 installed=""

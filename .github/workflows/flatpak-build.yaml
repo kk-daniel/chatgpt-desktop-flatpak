@@ -219,6 +219,22 @@ jobs:
           [ -x "$loc/files/bin/bwrap" ] \
             || { echo "ERROR: bwrap shim missing or not executable" >&2; fail=1; }
 
+          # Nothing verifies the payload's signature without these two, and
+          # a build that quietly lost either would fetch and unpack exactly
+          # as before -- the check it dropped is the silent kind.
+          [ -x "$loc/files/bin/osslsigncode" ] \
+            || { echo "ERROR: osslsigncode missing or not executable" >&2; fail=1; }
+          roots="$loc/files/share/chatgpt/microsoft-roots.pem"
+          if [ "$(grep -c 'BEGIN CERTIFICATE' "$roots" 2>/dev/null || echo 0)" != "2" ]; then
+            echo "ERROR: expected both Microsoft roots in microsoft-roots.pem" >&2
+            fail=1
+          fi
+          # The patch is the difference between verifying Store packages and
+          # rejecting every one of them, and it applies to a pinned release,
+          # so a bump that silently drops it has to fail here.
+          flatpak run --branch="$BRANCH" --command=osslsigncode "$APP_ID" --version >/dev/null 2>&1 \
+            || { echo "ERROR: osslsigncode does not run" >&2; fail=1; }
+
           # Unlike the two natives above this one is not swapped into the
           # payload but resolved out of /app, so the whole package has to be
           # here -- a missing dependency only shows up as a failed import at

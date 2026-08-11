@@ -20,3 +20,8 @@
 *.asc
 *.pem
 secring*
+
+# ...except the Microsoft roots the payload signature is checked against.
+# Public, like repo.gpg above, and the one part of that check a substituted
+# package cannot reach -- so it has to ship.
+!com.openai.ChatGPT/microsoft-roots.pem
