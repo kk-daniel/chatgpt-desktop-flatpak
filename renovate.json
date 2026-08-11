@@ -15,14 +15,12 @@
     {
       "description": "7-Zip",
       "groupName": "7zip",
-      "matchPackageNames": ["7zip", "ip7z/7zip"],
-      "automerge": true
+      "matchPackageNames": ["7zip", "ip7z/7zip"]
     },
     {
       "description": "Electron. Held to what the upstream app is built against, and every bump drags the node headers the native modules compile against, so these are reviewed by hand.",
       "groupName": "electron",
       "matchPackageNames": ["electron"],
-      "automerge": false,
       "separateMultipleMajor": true
     }
   ],
