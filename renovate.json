@@ -22,7 +22,8 @@
       "description": "Electron. Held to what the upstream app is built against, and every bump drags the node headers the native modules compile against, so these are reviewed by hand.",
       "groupName": "electron",
       "matchPackageNames": ["electron"],
-      "automerge": false
+      "automerge": false,
+      "separateMultipleMajor": true
     }
   ],
   "customManagers": [

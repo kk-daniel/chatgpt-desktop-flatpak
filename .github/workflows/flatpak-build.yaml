@@ -27,7 +27,10 @@ jobs:
   # build job ever sees it.
   post-renovate:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.actor == 'renovate[bot]' && (github.head_ref == 'renovate/chatgpt' || github.head_ref == 'renovate/major-chatgpt' || github.head_ref == 'renovate/7zip' || github.head_ref == 'renovate/major-7zip' || github.head_ref == 'renovate/electron' || github.head_ref == 'renovate/major-electron')
+    # Match on the group slug the branch ends with, not the whole name: with
+    # separateMultipleMajor the majors arrive as renovate/major-<N>-<group>,
+    # and an exact-name gate would silently skip them.
+    if: github.event_name == 'pull_request' && github.actor == 'renovate[bot]' && startsWith(github.head_ref, 'renovate/') && (endsWith(github.head_ref, 'chatgpt') || endsWith(github.head_ref, '7zip') || endsWith(github.head_ref, 'electron'))
     steps:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
@@ -41,13 +44,13 @@ jobs:
           ref: ${{ github.head_ref }}
           fetch-depth: 2
       - name: Update metainfo
-        if: github.head_ref == 'renovate/chatgpt' || github.head_ref == 'renovate/major-chatgpt'
+        if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, 'chatgpt')
         run: '"./${APP_ID}/update-metainfo.sh"'
       - name: Update 7-Zip checksums
-        if: github.head_ref == 'renovate/7zip' || github.head_ref == 'renovate/major-7zip'
+        if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, '7zip')
         run: '"./${APP_ID}/update-7zip-checksum.sh"'
       - name: Update Electron checksums
-        if: github.head_ref == 'renovate/electron' || github.head_ref == 'renovate/major-electron'
+        if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, 'electron')
         run: '"./${APP_ID}/update-electron-checksum.sh"'
       - name: Get last commit message
         id: last-commit
