@@ -213,6 +213,9 @@ jobs:
           [ -s "$loc/files/share/chatgpt/expected-version" ] \
             || { echo "ERROR: expected-version missing or empty" >&2; fail=1; }
 
+          [ -x "$loc/files/bin/bwrap" ] \
+            || { echo "ERROR: bwrap shim missing or not executable" >&2; fail=1; }
+
           # Unlike the two natives above this one is not swapped into the
           # payload but resolved out of /app, so the whole package has to be
           # here -- a missing dependency only shows up as a failed import at
@@ -304,6 +307,30 @@ jobs:
           elif [ "$target" != "$ours" ]; then
             echo "note: payload targets Electron $target, bundling $ours (same major)"
           fi
+
+          # Codex's bubblewrap calls go through the shim, which re-expresses
+          # them as `flatpak-spawn --sandbox`. Exercise the whole chain --
+          # argument parsing through to the portal -- and check the child is
+          # actually confined rather than merely running.
+          out="$(flatpak run --branch="$BRANCH" --command=bwrap "$APP_ID" \
+                   --unshare-user --unshare-net --ro-bind / / --chdir / -- \
+                   /bin/sh -c 'echo SHIM_OK; ls /mnt >/dev/null 2>&1 && echo LEAK' 2>&1 || true)"
+          case "$out" in
+            *LEAK*) echo "ERROR: bwrap shim did not confine the child: $out" >&2; fail=1 ;;
+            *SHIM_OK*) echo "bwrap shim translated and confined correctly" ;;
+            *) echo "ERROR: bwrap shim failed: $out" >&2; fail=1 ;;
+          esac
+
+          # Codex's own capability probe, verbatim: no --chdir, so the child
+          # inherits a cwd it cannot see. Getting this wrong makes Codex
+          # report "no system bwrap was found on PATH" and disable its
+          # sandbox entirely, with nothing in the shim log to explain it.
+          flatpak run --branch="$BRANCH" --command=bwrap "$APP_ID" \
+            --unshare-user --unshare-net --ro-bind / / /bin/true \
+            || { echo "ERROR: bwrap shim fails Codex's capability probe" >&2; fail=1; }
+
+          flatpak run --branch="$BRANCH" --command=bwrap "$APP_ID" --version >/dev/null \
+            || { echo "ERROR: bwrap shim does not answer --version" >&2; fail=1; }
 
           # The payload has no @parcel/watcher, so the app reaches ours by
           # walking node_modules up out of app.asar. Check the link, then

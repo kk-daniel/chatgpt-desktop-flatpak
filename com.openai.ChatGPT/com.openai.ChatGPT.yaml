@@ -255,6 +255,11 @@ modules:
     build-commands:
       - install -Dm755 chatgpt.sh /app/bin/chatgpt
       - install -Dm755 chatgpt-fetch.sh /app/bin/chatgpt-fetch
+      # Installed as `bwrap` so Codex finds it on PATH ahead of its
+      # bundled copy. Flatpak denies the namespace syscalls bubblewrap
+      # needs, so the shim re-expresses the request as
+      # `flatpak-spawn --sandbox`, which needs no extra permission.
+      - install -Dm755 bwrap-shim.sh /app/bin/bwrap
       - install -Dm644 expected-version /app/share/chatgpt/expected-version
       - install -Dm644 ${FLATPAK_ID}.metainfo.xml -t /app/share/metainfo
       - install -Dm644 ${FLATPAK_ID}.desktop -t /app/share/applications
@@ -275,6 +280,8 @@ modules:
         path: chatgpt.sh
       - type: file
         path: chatgpt-fetch.sh
+      - type: file
+        path: bwrap-shim.sh
       - type: file
         path: expected-version
       - type: file

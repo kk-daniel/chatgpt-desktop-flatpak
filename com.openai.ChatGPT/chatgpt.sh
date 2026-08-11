@@ -18,6 +18,46 @@ ensure_codex_dir() {
   fi
 }
 
+# The bwrap shim cannot hand a sandboxed command the caller's /tmp: the
+# portal always gives the child a fresh private tmpfs. Left unset, Codex
+# keeps declaring a policy the sandbox does not implement. Only ever adds --
+# an existing setting of either key is left alone, including an explicit
+# false, and any failure here costs the setting, not the launch.
+ensure_codex_sandbox_config() {
+  local cfg="$HOME/.codex/config.toml"
+  local section='[sandbox_workspace_write]'
+  local tmp
+
+  grep -qs 'exclude_slash_tmp\|exclude_tmpdir_env_var' "$cfg" && return 0
+
+  if [ ! -f "$cfg" ]; then
+    printf '%s\nexclude_slash_tmp = true\nexclude_tmpdir_env_var = true\n' \
+      "$section" > "$cfg" 2>/dev/null && log "Created $cfg with sandbox tmp settings"
+    return 0
+  fi
+
+  if grep -qsF "$section" "$cfg"; then
+    tmp="$cfg.chatgpt-new"
+    awk -v sec="$section" '
+      { print }
+      index($0, sec) == 1 && !done {
+        print "exclude_slash_tmp = true"
+        print "exclude_tmpdir_env_var = true"
+        done = 1
+      }
+    ' "$cfg" > "$tmp" 2>/dev/null &&
+      mv "$tmp" "$cfg" 2>/dev/null &&
+      log "Added sandbox tmp settings under existing $section"
+    rm -f "$tmp" 2>/dev/null
+  else
+    # A table header at end of file is always valid TOML and cannot land
+    # inside another table's scope.
+    printf '\n%s\nexclude_slash_tmp = true\nexclude_tmpdir_env_var = true\n' \
+      "$section" >> "$cfg" 2>/dev/null && log "Appended $section to $cfg"
+  fi
+  return 0
+}
+
 electron_args=()
 # Chromium picks its safeStorage backend from XDG_CURRENT_DESKTOP and falls
 # back to a hardcoded key on unrecognised desktops, which silently defeats
@@ -33,6 +73,7 @@ if [ -n "${XRDP_SESSION:-}" ]; then
 fi
 
 ensure_codex_dir
+ensure_codex_sandbox_config
 
 # Populates /var/data/chatgpt, which /app/electron/{resources,assets}
 # symlink to.
@@ -52,6 +93,14 @@ export ELECTRON_OZONE_PLATFORM_HINT="${ELECTRON_OZONE_PLATFORM_HINT:-wayland}"
 for tool_bin in /app/tools/*/bin; do
   [ -d "$tool_bin" ] && PATH="$tool_bin:$PATH"
 done
+
+# /app/bin last, so it wins outright. Codex picks the first bwrap on PATH,
+# and a real one there -- from a tool extension, or a host install visible
+# through a --filesystem override, e.g. Homebrew's -- would be used instead
+# of our shim and then die on the blocked namespace syscalls.
+PATH="/app/bin:$PATH"
 export PATH
+log "PATH=$PATH"
+log "bwrap resolves to: $(command -v bwrap || echo '<none>')"
 
 exec /app/bin/zypak-wrapper.sh /app/electron/electron "${electron_args[@]}" "$@"
