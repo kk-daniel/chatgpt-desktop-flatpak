@@ -82,6 +82,23 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # The commit belongs to the app that authorises it, not to a name
+      # invented here. GitHub's noreply address for a bot account needs its
+      # numeric id, which only the API knows -- and getting it wrong makes
+      # the commit show up unattributed rather than failing loudly.
+      - name: Resolve the app's commit identity
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -eo pipefail
+          [ -n "$SLUG" ] || { echo "app-slug was empty" >&2; exit 1; }
+          id="$(gh api "/users/${SLUG}%5Bbot%5D" --jq .id)"
+          [ -n "$id" ] || { echo "could not resolve ${SLUG}[bot]" >&2; exit 1; }
+          echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${id}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
       - name: Write the oracle
         env:
           VERSION: ${{ steps.read.outputs.version }}
@@ -98,5 +115,6 @@ jobs:
           branch: version-oracle
           file_pattern: chatgpt-version.json
           commit_message: "ChatGPT ${{ steps.read.outputs.version }}"
-          commit_user_name: chatgpt-flatpak-bot
-          commit_user_email: chatgpt-flatpak-bot@users.noreply.github.com
+          commit_author: ${{ steps.bot.outputs.name }} <${{ steps.bot.outputs.email }}>
+          commit_user_name: ${{ steps.bot.outputs.name }}
+          commit_user_email: ${{ steps.bot.outputs.email }}
