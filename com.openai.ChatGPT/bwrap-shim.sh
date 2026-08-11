@@ -320,11 +320,8 @@ case "${cmd[0]}" in
   /*) expose --sandbox-expose-path-ro "$(dirname -- "${cmd[0]}")" "$(dirname -- "${cmd[0]}")" try ;;
 esac
 
-# Exposures land at their host paths, but the command refers to the
-# in-sandbox names. The child's / is a fresh tmpfs, so those names are
-# recreated as symlinks and the command's own argv is left untouched --
-# which matters, because paths also appear inside the shell script Codex
-# passes to `sh -c`, where rewriting would be guesswork.
+# The rewrite above already put cmd[0] in its host form, so this picks up
+# the name the child will actually be told to run.
 [ -n "$argv0" ] || argv0="${cmd[0]}"
 
 # The only thing still wrapped: flatpak-spawn has no --argv0, and Codex
@@ -334,6 +331,11 @@ setup='exec -a "$SHIM_ARGV0" "$@"'
 spawn+=("--env=SHIM_ARGV0=$argv0")
 
 log "SPAWN[$$]: $(printf '%q ' "${spawn[@]}")"
+# The rewritten command as well as the sandbox flags. When a path inside
+# the script Codex hands to `sh -c` comes out wrong, this is the only place
+# the final form is visible -- and logging it before the portal call is
+# what lets the translation be tested where no portal exists.
+log "EXEC[$$]: $(printf '%q ' "${cmd[@]}")"
 
 # Run rather than exec, so a failure gets an exit code and any output
 # recorded. Codex swallows the child's stderr when the command fails, which

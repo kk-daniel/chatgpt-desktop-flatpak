@@ -166,9 +166,10 @@ an explicit `false` — and any other settings in the file are preserved.
 Flatpak also maps some directories to paths that do not exist on the host —
 `/var/data`, and `$HOME/.codex` under `--persist`. The portal resolves
 exposures against the real `~/.var/app/<id>/…` location, so the shim exposes
-them there and recreates the in-sandbox names as symlinks inside the child.
-That keeps the command's own argv untouched, which matters because paths
-also appear inside the shell script Codex hands to `sh -c`.
+them there and rewrites the same paths throughout the command it hands over.
+One pass fixes the binary's own path, the paths inside
+`--permission-profile`, and the ones embedded in the shell script Codex
+hands to `sh -c`.
 
 The shim also exposes `~/.codex/shell_snapshots` read-only. Codex's
 generated script sources the session snapshot from there, and `sh` is bash
@@ -204,6 +205,21 @@ returned `Permission denied`. Nothing reaches the host either way.
 Each command starts a fresh Flatpak instance, costing a few hundred
 milliseconds, and the child has no session bus (flatpak disables it for
 `--sandbox`), so commands needing D-Bus will not work.
+
+That table is also the part CI cannot check. Reaching the portal needs a
+session bus, and the build container has none — `flatpak-spawn` gets as far
+as `Cannot spawn a message bus without a machine-id` and stops. So
+`test-bwrap-shim.sh` asserts the *translation* instead, reading the line the
+shim logs just before it spawns; it covers the parser in its real
+environment but stops at the portal's door. Whether the child is actually
+confined has to be re-measured on a desktop after any change to the
+translation:
+
+```bash
+flatpak run --command=bwrap com.openai.ChatGPT --unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/sh -c 'echo ok; ls /mnt'
+```
+
+which must print `ok` and fail to list `/mnt`.
 
 The practical limit is reach, not tooling. The runtime is the freedesktop
 **Sdk**, so `git`, `gcc`, `make` and `python3` are present, and `node`/`npx`
