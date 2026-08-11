@@ -205,7 +205,7 @@ expose() {
 # `--perms 555 --tmpfs X --remount-ro X`. A nested read-only exposure
 # overrides a writable parent, so this preserves the part that matters --
 # the agent cannot write X. It does not hide X's contents the way an empty
-# tmpfs does; that difference is documented in the README.
+# tmpfs does; that difference is documented in SANDBOXING.md.
 mask() {
   local path="$1"
   case "$path" in /|/tmp|/tmp/*) return 0 ;; esac
