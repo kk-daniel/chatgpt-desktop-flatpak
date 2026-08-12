@@ -86,10 +86,10 @@
   ],
   "customDatasources": {
     "chatgpt-desktop": {
-      "defaultRegistryUrlTemplate": "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json",
+      "defaultRegistryUrlTemplate": "https://raw.githubusercontent.com/kk-daniel/chatgpt-desktop-flatpak/version-oracle/chatgpt-version.json",
       "format": "json",
       "transformTemplates": [
-        "{ \"releases\": [{ \"version\": buildVersion }] }"
+        "{ \"releases\": [{ \"version\": version }] }"
       ]
     },
     "flathub-runtime": {

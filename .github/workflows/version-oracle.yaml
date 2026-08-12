@@ -1,0 +1,120 @@
+name: Version oracle
+
+# Publishes the ChatGPT build OpenAI actually serves, so Renovate can see
+# it.
+#
+# Renovate needs a version it can read out of a response *body*. OpenAI
+# publishes two numbers and neither fits: windows-store-update.json carries
+# the Microsoft Store build, which runs ahead of the direct download and is
+# not what chatgpt-fetch compares against, and the served build is only
+# ever reported in an HTTP header (x-ms-meta-package_version) that no
+# custom datasource can reach. Pointing Renovate at the Store manifest is
+# what put expected-version two builds ahead of anything installable.
+#
+# So this writes the header value to a body of our own, on an orphan branch
+# that holds nothing else, and Renovate reads that. Everything downstream
+# is unchanged: Renovate owns the version, post-renovate derives the
+# metainfo from it, automerge lands it, auto-release tags it -- the same
+# shape the sibling claude-desktop-flatpak gets for free from an APT index.
+#
+# The file carries a timestamp as well as the version, so it changes on
+# every run rather than only on a release. That is deliberate: a silently
+# stale oracle looks exactly like "OpenAI has not shipped anything", and
+# GitHub disables scheduled workflows after 60 days of repository
+# inactivity, which would cause precisely that.
+
+on:
+  schedule:
+    # Odd minute, off the hour: scheduled runs cluster on the hour and get
+    # queued.
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+env:
+  APP_ID: com.openai.ChatGPT
+  # Only for `run:` steps. The branch and file are written out literally in
+  # every `with:` below: an env reference that failed to resolve there
+  # would leave `ref` empty, which checks out the default branch -- and the
+  # publish step would then commit the oracle onto main.
+  ORACLE_FILE: chatgpt-version.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: version-oracle
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Separate checkout rather than a branch switch: the script lives on
+      # the default branch and the file lives on the orphan one, and they
+      # share no history.
+      - name: Checkout the oracle branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: version-oracle
+          path: oracle
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Read the served version
+        id: read
+        run: |
+          set -eo pipefail
+          version="$("./${APP_ID}/update-expected-version.sh" --print)"
+          # Anything that is not a version string would be published as
+          # one, and Renovate would rewrite expected-version to match it.
+          # Refuse instead: a failed run is visible, a bad version is not.
+          if ! printf '%s' "$version" | grep -qE '^[0-9]+(\.[0-9]+)+$'; then
+            echo "Refusing to publish '$version' as a version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The commit belongs to the app that authorises it, not to a name
+      # invented here. GitHub's noreply address for a bot account needs its
+      # numeric id, which only the API knows -- and getting it wrong makes
+      # the commit show up unattributed rather than failing loudly.
+      - name: Resolve the app's commit identity
+        id: bot
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -eo pipefail
+          [ -n "$SLUG" ] || { echo "app-slug was empty" >&2; exit 1; }
+          id="$(gh api "/users/${SLUG}%5Bbot%5D" --jq .id)"
+          [ -n "$id" ] || { echo "could not resolve ${SLUG}[bot]" >&2; exit 1; }
+          echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${id}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Write the oracle
+        env:
+          VERSION: ${{ steps.read.outputs.version }}
+        run: |
+          set -eo pipefail
+          printf '{\n  "version": "%s",\n  "checked": "%s"\n}\n' \
+            "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "oracle/${ORACLE_FILE}"
+          cat "oracle/${ORACLE_FILE}"
+
+      - name: Publish
+        uses: stefanzweifel/git-auto-commit-action@4a55954c782fc1ea30b9056cd3e7a2b40ca8887d # v7.2.0
+        with:
+          repository: oracle
+          branch: version-oracle
+          file_pattern: chatgpt-version.json
+          commit_message: "ChatGPT ${{ steps.read.outputs.version }}"
+          commit_author: ${{ steps.bot.outputs.name }} <${{ steps.bot.outputs.email }}>
+          commit_user_name: ${{ steps.bot.outputs.name }}
+          commit_user_email: ${{ steps.bot.outputs.email }}
