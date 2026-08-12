@@ -126,15 +126,15 @@ modules:
       # below are compiled against this exact version's headers.
       - type: archive
         only-arches: [x86_64]
-        url: https://github.com/electron/electron/releases/download/v42.3.0/electron-v42.3.0-linux-x64.zip
-        sha256: 487a667ca6a734b958c16cff1df74d9d44d2c18a6cccdb4dd51f6301a356c420
+        url: https://github.com/electron/electron/releases/download/v42.9.0/electron-v42.9.0-linux-x64.zip
+        sha256: 419e83ed53820de148cb9029d949fdf9f29b943f59f289c4aac046bcf0736780
         # Electron zips have no top-level directory, so the default
         # strip-components: 1 flattens locales/ and resources/ into the root.
         strip-components: 0
       - type: archive
         only-arches: [aarch64]
-        url: https://github.com/electron/electron/releases/download/v42.3.0/electron-v42.3.0-linux-arm64.zip
-        sha256: 2a375ff973fb7bddc538a4f67b2141947e9d72513a1baa2beabec2a7f65cd0f0
+        url: https://github.com/electron/electron/releases/download/v42.9.0/electron-v42.9.0-linux-arm64.zip
+        sha256: 002fef556940e7a565f29e4dfc64a53f662cfb909e14c0da12927df400f3365f
         strip-components: 0
 
   # The MSIX ships better-sqlite3 and node-pty as Windows DLLs. Without
@@ -196,8 +196,8 @@ modules:
         done
     sources:
       - type: archive
-        url: https://artifacts.electronjs.org/headers/dist/v42.3.0/node-v42.3.0-headers.tar.gz
-        sha256: 821009f9c1830050d894aef9e61906cb0a537b2000b2d9bbed9985fff1d5e0d0
+        url: https://artifacts.electronjs.org/headers/dist/v42.9.0/node-v42.9.0-headers.tar.gz
+        sha256: 7bef173f1350b2c9622b56fcd5ea24a578d2294ab164fd0c55aefa842a0243a6
         dest: headers
       - type: archive
         url: https://registry.npmjs.org/better-sqlite3/-/better-sqlite3-12.11.1.tgz
