@@ -182,12 +182,35 @@ tested against (`expected-version`) and *local* is what is unpacked:
 So the usual start costs nothing: no HEAD request, no latency. Users also
 get new OpenAI builds without waiting for this repo to catch up.
 
-The trade-off is the trust anchor. `extra-data` would verify a checksum;
-here the guarantees are HTTPS to `persistent.oaistatic.com` plus an
-identity check on the downloaded `AppxManifest.xml` (package name
-`OpenAI.Codex` and the expected publisher CN) before anything is unpacked.
-That is the same trust model the app's own updater uses, but it is weaker
-than a pinned hash, and worth knowing about.
+That leaves the trust anchor, and a checksum is not the only way to have
+one. The MSIX is signed through the Microsoft Store, so `chatgpt-fetch`
+verifies **the signature** before anything is unpacked — which is the
+better fit here anyway: a pinned hash goes stale on OpenAI's next release,
+authenticity does not.
+
+What that check is worth, precisely:
+
+| | |
+| --- | --- |
+| binds the signature to these bytes | yes — the Appx content digests are recomputed and compared |
+| trust anchors | Microsoft's 2011 root for the signature, its 2010 root for the timestamp, both shipped in this repo |
+| binds the package to *OpenAI* | yes — the signer's subject is taken from the **verified certificate**, not from the manifest inside the archive |
+| revocation | checked; the CRL for each chain is fetched and verified |
+| on failure | nothing is unpacked, and the launch stops with a dialog |
+
+The identity greps over `AppxManifest.xml` are still there, but they are
+sanity checks now, not the guarantee: a substituted payload would carry a
+substituted manifest saying exactly the same thing. Only the signature
+comes from somewhere the archive cannot reach.
+
+Two details are worth knowing because they look wrong at first. The Store
+signs with a certificate valid for **three days**, so it has long expired
+by the time you install — the signature is timestamped, and verification
+happens at signing time. And nothing off-the-shelf verifies these packages
+on Linux: Store leaf certificates carry a critical Application Policies
+extension OpenSSL does not parse, so `osslsigncode` rejects the chain
+before comparing any digest. This repo carries a small patch that tolerates
+that one extension and nothing else.
 
 Cost: ~700 MB downloaded on first launch and ~730 MB kept unpacked in the
 app's data directory.
