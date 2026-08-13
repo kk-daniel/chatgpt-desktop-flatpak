@@ -22,15 +22,17 @@ concurrency:
 
 jobs:
   # Renovate can bump a version string but not the things derived from it:
-  # the Electron / 7-Zip checksums, and the metainfo release entry that
-  # follows a ChatGPT bump. Fill those in on the Renovate branch before the
-  # build job ever sees it.
+  # the 7-Zip checksums, and -- following a ChatGPT bump -- the metainfo
+  # release entry and the bundled Electron. Electron is derived rather than
+  # tracked: the app is built against one exact version, so the payload
+  # decides it and Renovate is not asked. Fill these in on the Renovate
+  # branch before the build job ever sees it.
   post-renovate:
     runs-on: ubuntu-latest
     # Match on the group slug the branch ends with, not the whole name: with
     # separateMultipleMajor the majors arrive as renovate/major-<N>-<group>,
     # and an exact-name gate would silently skip them.
-    if: github.event_name == 'pull_request' && github.actor == 'renovate[bot]' && startsWith(github.head_ref, 'renovate/') && (endsWith(github.head_ref, 'chatgpt') || endsWith(github.head_ref, '7zip') || endsWith(github.head_ref, 'electron'))
+    if: github.event_name == 'pull_request' && github.actor == 'renovate[bot]' && startsWith(github.head_ref, 'renovate/') && (endsWith(github.head_ref, 'chatgpt') || endsWith(github.head_ref, '7zip'))
     steps:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
@@ -43,15 +45,19 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           ref: ${{ github.head_ref }}
           fetch-depth: 2
+      # Before the metainfo, because this is the step that can refuse. A
+      # major Electron change needs a human, and failing here is what stops
+      # the branch merging: build only runs when post-renovate is skipped,
+      # and nothing merges a red pull request.
+      - name: Update Electron to what the payload targets
+        if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, 'chatgpt')
+        run: '"./${APP_ID}/update-electron-version.sh"'
       - name: Update metainfo
         if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, 'chatgpt')
         run: '"./${APP_ID}/update-metainfo.sh"'
       - name: Update 7-Zip checksums
         if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, '7zip')
         run: '"./${APP_ID}/update-7zip-checksum.sh"'
-      - name: Update Electron checksums
-        if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, 'electron')
-        run: '"./${APP_ID}/update-electron-checksum.sh"'
       - name: Get last commit message
         id: last-commit
         run: |
@@ -331,7 +337,7 @@ jobs:
             fail=1
           elif [ "${target%%.*}" != "${ours%%.*}" ]; then
             echo "ERROR: payload targets Electron $target but this Flatpak bundles $ours" >&2
-            echo "Bump the electron module and run update-electron-checksum.sh." >&2
+            echo "Run update-electron-version.sh; a major needs checking by hand." >&2
             fail=1
           elif [ "$target" != "$ours" ]; then
             echo "note: payload targets Electron $target, bundling $ours (same major)"

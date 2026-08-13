@@ -14,7 +14,14 @@ electron_version() {
   sed -n 's#.*releases/download/v\([0-9][0-9.]*\)/electron-v.*-linux-x64\.zip.*#\1#p' "$manifest" | head -n 1
 }
 
-version="$(electron_version)"
+# With an argument, re-pin to that version -- update_zip and update_headers
+# below build every URL from it, so this is also how the version itself
+# gets changed. Without one, refresh the checksums of whatever the manifest
+# already names.
+version="${1:-}"
+if [ -z "$version" ]; then
+  version="$(electron_version)"
+fi
 if [ -z "$version" ]; then
   echo "Error: could not find Electron version in $manifest" >&2
   exit 1

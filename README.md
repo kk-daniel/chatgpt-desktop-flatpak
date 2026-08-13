@@ -226,18 +226,25 @@ There are no MSIX checksums to maintain. The only thing tracking upstream is
 `expected-version`, which drives the drift warning above and the metainfo
 release entry.
 
-Renovate keeps it current on its own: OpenAI publish
-`codex-app-prod/windows-store-update.json`, whose `buildVersion` field is
-used as a custom datasource, and a custom manager matches the bare version
-in `expected-version`. A ChatGPT bump lands on `renovate/chatgpt`, where
-CI adds the metainfo release entry before the build sees it.
-`update-expected-version.sh` does the same thing by hand (one HEAD request,
-no download) if you want to bump it without waiting for Renovate.
+Renovate keeps it current on its own, through a value this repo publishes
+for it. The build OpenAI actually serves is reported only in an HTTP header,
+which no custom datasource can read, so a scheduled workflow writes it to
+the `version-oracle` branch and the datasource reads that. A ChatGPT bump
+then lands on `renovate/chatgpt`, where CI fills in what the version
+implies before the build sees it. `update-expected-version.sh` does the
+same by hand (one HEAD request, no download) if you would rather not wait.
 
-Renovate still handles 7-Zip, Electron and the runtime. An Electron bump
-must go through `update-electron-checksum.sh`, which re-pins the node
-headers alongside the archives — native modules built against mismatched
-headers fail at `dlopen` on the user's machine rather than in CI.
+**Electron is not tracked by Renovate**, because it is not a choice: the app
+is built against one exact version and its native modules compile against
+that version's headers. So the payload decides it.
+`update-electron-version.sh` reads the declaration out of the payload —
+about 8 MB of ranged reads rather than the 640 MB download — and re-pins the
+archives and the node headers to match, as part of the same ChatGPT bump. It
+refuses to cross a major on its own: that needs the native modules and the
+Electron BaseApp checked by hand, and failing there is what keeps the branch
+from merging.
+
+Renovate still handles 7-Zip and the runtime.
 
 ### Which Electron to bundle
 
