@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 """Print the Electron version the current ChatGPT payload is built against.
 
-The value lives in package.json inside app.asar inside the MSIX, and the
-whole point of reading it here is to do so without the 640 MB download:
-a zip's central directory is at the end of the file and an asar's header is
-at the start of its data, so ranged reads get to package.json after about
-8 MB. chatgpt-fetch reads the same field at run time, from the copy already
-on disk, to warn about drift -- this is the build-time half of that.
+The value is package.json's devDependencies.electron, and package.json is
+inside app.asar inside the MSIX. The point of reading it here is to do so
+without the 640 MB download: a zip's central directory is at the end of the
+file and an asar carries an index of its contents at the start, so ranged
+reads reach package.json after about 8 MB. chatgpt-fetch reads the same
+field at run time from the copy already on disk, to warn about drift; this
+is the build-time half of that.
+
+The asar index is used rather than searched for. An earlier version looked
+for the package name and matched a version declaration near it, which fails
+the moment that name appears anywhere earlier in 40 MB of bundled
+JavaScript -- and fails by finding nothing rather than by finding the wrong
+thing, so it would have blocked every ChatGPT bump until someone noticed.
 
 Bash cannot inflate a zip member from a stream, which is the only reason
 this is Python.
 """
 import io
 import json
-import re
 import sys
 import urllib.request
 import zipfile
 
-URL = ("https://persistent.oaistatic.com/codex-app-prod/ChatGPT-x64.msix")
+URL = "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-x64.msix"
 # Cloudflare rejects urllib's default agent on this host.
 HEADERS = {"User-Agent": "curl/8.5.0"}
-# package.json sits about 20 MB into the asar; stop well after that rather
-# than stream the whole 226 MB if the layout ever changes.
-LIMIT = 40_000_000
-DECL = re.compile(rb'"electron"\s*:\s*"[\^~]?([0-9][^"]*)"')
 
 
 class RangeFile(io.RawIOBase):
@@ -60,6 +62,14 @@ class RangeFile(io.RawIOBase):
         req = urllib.request.Request(
             self.url, headers={**HEADERS, "Range": f"bytes={self.pos}-{end}"})
         with urllib.request.urlopen(req, timeout=120) as r:
+            # A 200 here means the range was ignored and the body is the
+            # whole 640 MB. Nothing downstream would notice: the offsets
+            # would simply address the wrong bytes, after transferring
+            # everything this class exists to avoid.
+            if r.status != 206:
+                raise OSError(
+                    f"expected a partial response, got HTTP {r.status} -- "
+                    "the server is not honouring Range")
             data = r.read()
         self.pos += len(data)
         return data
@@ -70,35 +80,60 @@ class RangeFile(io.RawIOBase):
         return len(d)
 
 
+def read_exact(stream, n):
+    """Streams give short reads; every offset here depends on exact counts."""
+    out = bytearray()
+    while len(out) < n:
+        chunk = stream.read(n - len(out))
+        if not chunk:
+            raise EOFError(f"app.asar ended {n - len(out)} bytes early")
+        out += chunk
+    return bytes(out)
+
+
+def asar_package_json(stream):
+    """Read package.json out of an asar being streamed from its start."""
+    header_size = int.from_bytes(read_exact(stream, 16)[12:16], "little")
+    index = json.loads(read_exact(stream, header_size).decode("utf-8"))
+    # The header is padded to a 4-byte boundary and the data section starts
+    # after the padding. Ignoring it happens to work whenever the header is
+    # already aligned, which is why a version that did so passed against
+    # this payload and misread another.
+    read_exact(stream, -header_size % 4)
+
+    entry = index.get("files", {}).get("package.json")
+    if entry is None:
+        raise LookupError("package.json is not at the root of app.asar")
+
+    read_exact(stream, int(entry["offset"]))
+    return json.loads(read_exact(stream, int(entry["size"])).decode("utf-8"))
+
+
 def main():
     z = zipfile.ZipFile(io.BufferedReader(RangeFile(URL), buffer_size=1 << 20))
-    try:
-        name = next(n for n in z.namelist() if n.endswith("resources/app.asar"))
-    except StopIteration:
+    names = [n for n in z.namelist() if n.endswith("resources/app.asar")]
+    if not names:
         print("no app.asar in the payload", file=sys.stderr)
         return 1
 
-    with z.open(name) as f:
-        buf = bytearray()
-        while len(buf) < LIMIT:
-            chunk = f.read(1 << 20)
-            if not chunk:
-                break
-            buf += chunk
-            # The declaration is matched near the package name rather than
-            # anywhere in 40 MB of bundled JavaScript, which mentions
-            # "electron" constantly.
-            i = buf.find(b"openai-codex-electron")
-            if i == -1:
-                continue
-            m = DECL.search(bytes(buf[max(0, i - 2000):i + 4000]))
-            if m:
-                print(m.group(1).decode())
-                return 0
+    with z.open(names[0]) as f:
+        package = asar_package_json(f)
 
-    print("could not find the Electron declaration in app.asar", file=sys.stderr)
-    return 1
+    declared = (package.get("devDependencies") or {}).get("electron")
+    if not declared:
+        print("app.asar declares no Electron devDependency", file=sys.stderr)
+        return 1
+
+    # A caret or tilde range would still name the version it was resolved
+    # from, which is the one the app was built against.
+    print(declared.lstrip("^~"))
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (OSError, ValueError, LookupError, EOFError) as e:
+        print(f"could not read the payload's Electron version: {e}",
+              file=sys.stderr)
+        sys.exit(1)

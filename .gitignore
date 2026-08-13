@@ -25,3 +25,7 @@ secring*
 # Public, like repo.gpg above, and the one part of that check a substituted
 # package cannot reach -- so it has to ship.
 !com.openai.ChatGPT/microsoft-roots.pem
+
+# Python bytecode, from running the payload reader locally.
+__pycache__/
+*.pyc

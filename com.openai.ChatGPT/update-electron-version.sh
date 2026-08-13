@@ -20,12 +20,26 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
 manifest="com.openai.ChatGPT.yaml"
 
-current="$(sed -n 's#.*releases/download/v\([0-9][0-9.]*\)/electron-v.*-linux-x64\.zip.*#\1#p' \
-  "$manifest" | head -n 1)"
-[ -n "$current" ] || { echo "Error: no Electron version in $manifest" >&2; exit 1; }
+# Both archives, not just x64: update-electron-checksum.sh writes them from
+# one version so these scripts cannot make them disagree, but a hand edit
+# can -- and nothing else in this repo looks at the aarch64 one.
+pinned() {
+  sed -n "s#.*releases/download/v\([0-9][0-9.]*\)/electron-v.*-linux-$1\.zip.*#\1#p" \
+    "$manifest" | head -n 1
+}
+current="$(pinned x64)"
+current_arm="$(pinned arm64)"
+[ -n "$current" ] && [ -n "$current_arm" ] \
+  || { echo "Error: no Electron version in $manifest" >&2; exit 1; }
+if [ "$current" != "$current_arm" ]; then
+  echo "Error: $manifest pins Electron $current for x64 and $current_arm for arm64." >&2
+  echo "Reconcile them before this can tell what is bundled." >&2
+  exit 1
+fi
 
+# No guard on the result: under set -e a failing command substitution in an
+# assignment already aborts, so a check here would never run.
 declared="$(./read-payload-electron.py)"
-[ -n "$declared" ] || exit 1
 
 if [ "$current" = "$declared" ]; then
   echo "Already current: Electron $current"

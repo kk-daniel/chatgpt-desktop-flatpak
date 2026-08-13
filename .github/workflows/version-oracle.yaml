@@ -118,3 +118,20 @@ jobs:
           commit_author: ${{ steps.bot.outputs.name }} <${{ steps.bot.outputs.email }}>
           commit_user_name: ${{ steps.bot.outputs.name }}
           commit_user_email: ${{ steps.bot.outputs.email }}
+
+      # After the publish, and warning rather than failing on a mismatch:
+      # upstream moving to a new Electron is not a reason to stop recording
+      # which build is being served. The step still fails if the reader
+      # itself breaks, which is the other half of why it is here -- between
+      # ChatGPT bumps nothing else runs it, so it would otherwise be found
+      # broken by the bump it was supposed to serve.
+      - name: Check the payload's Electron against what is bundled
+        run: |
+          set -eo pipefail
+          declared="$("./${APP_ID}/read-payload-electron.py")"
+          pinned="$(sed -n 's#.*releases/download/v\([0-9][0-9.]*\)/electron-v.*-linux-x64\.zip.*#\1#p' \
+            "${APP_ID}/${APP_ID}.yaml" | head -n 1)"
+          echo "payload targets Electron $declared, manifest pins $pinned"
+          if [ "${declared%%.*}" != "${pinned%%.*}" ]; then
+            echo "::warning::ChatGPT targets Electron $declared, this bundles $pinned. Crossing a major needs the native modules and the Electron BaseApp checked by hand."
+          fi
