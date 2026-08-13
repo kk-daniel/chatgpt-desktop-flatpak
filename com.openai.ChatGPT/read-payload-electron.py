@@ -20,6 +20,7 @@ this is Python.
 """
 import io
 import json
+import re
 import sys
 import urllib.request
 import zipfile
@@ -27,6 +28,8 @@ import zipfile
 URL = "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-x64.msix"
 # Cloudflare rejects urllib's default agent on this host.
 HEADERS = {"User-Agent": "curl/8.5.0"}
+# Two or more dot-separated numbers, and nothing else.
+VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)+")
 
 
 class RangeFile(io.RawIOBase):
@@ -126,7 +129,23 @@ def main():
 
     # A caret or tilde range would still name the version it was resolved
     # from, which is the one the app was built against.
-    print(declared.lstrip("^~"))
+    declared = declared.lstrip("^~")
+
+    # This came out of the payload, which is the thing this packaging does
+    # not trust -- chatgpt-fetch verifies the MSIX signature before
+    # unpacking it, and nothing has verified anything by the time this
+    # runs. What is printed here is interpolated into a shell variable, a
+    # download URL, and a GitHub Actions workflow command, and a JSON \n
+    # decodes to a real newline that survives all three. So it has to look
+    # like a version before it leaves this process. The oracle workflow
+    # applies the same rule to the value it publishes, for the same reason:
+    # a failed run is visible, a bad version is not.
+    if not VERSION.fullmatch(declared):
+        print(f"payload declares a non-version Electron value: {declared!r}",
+              file=sys.stderr)
+        return 1
+
+    print(declared)
     return 0
 
 
