@@ -287,6 +287,11 @@ modules:
       # needs, so the shim re-expresses the request as
       # `flatpak-spawn --sandbox`, which needs no extra permission.
       - install -Dm755 bwrap-shim.sh /app/bin/bwrap
+      # The read-only /app link gives filesystem-helper launches a stable
+      # log path even though Codex removes HOME, XDG_CACHE_HOME and
+      # BWRAP_LOG from their environment. chatgpt.sh creates or removes the
+      # writable target to enable or disable logging.
+      - ln -s /var/cache/chatgpt-flatpak/bwrap.log /app/bin/bwrap.log
       - install -Dm644 expected-version /app/share/chatgpt/expected-version
       - install -Dm644 microsoft-roots.pem /app/share/chatgpt/microsoft-roots.pem
       - install -Dm644 ${FLATPAK_ID}.metainfo.xml -t /app/share/metainfo

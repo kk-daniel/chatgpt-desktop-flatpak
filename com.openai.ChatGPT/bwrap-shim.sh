@@ -17,20 +17,24 @@
 # not isolation.
 set -euo pipefail
 
-log_file="${XDG_CACHE_HOME:-$HOME/.cache}/chatgpt-flatpak/bwrap.log"
+# The build installs this as a symlink into /var/cache. Its target exists
+# only when chatgpt.sh saw BWRAP_LOG=1. Codex's filesystem helper drops
+# BWRAP_LOG, HOME and the XDG variables, so neither the switch nor the log
+# path can depend on that helper environment.
+log_file=/app/bin/bwrap.log
 orig_argv=("$@")
 
-# Off unless asked for. Every command Codex runs passes through here and
-# the file has no rotation, so logging by default would grow without bound
-# for the sake of the rare session that needs explaining. Turn it on with
+# Off unless chatgpt.sh created the symlink target. Every command Codex runs
+# passes through here and the file has no rotation, so logging by default
+# would grow without bound for the sake of the rare session that needs
+# explaining. Turn it on with
 #
 #   flatpak override --user --env=BWRAP_LOG=1 com.openai.ChatGPT
 #
 # and note that a refusal only reaches stderr otherwise -- which Codex
 # swallows when the command fails.
 log() {
-  [ "${BWRAP_LOG:-}" = 1 ] || return 0
-  mkdir -p "${log_file%/*}" 2>/dev/null || return 0
+  [ -f "$log_file" ] || return 0
   printf '%s\n' "$*" >> "$log_file" 2>/dev/null || true
 }
 
@@ -147,13 +151,33 @@ while [ "${#pending[@]}" -gt 0 ]; do
   argv+=("$arg")
 done
 
-# Flatpak maps some directories into the sandbox at paths that do not exist
-# on the host: /var/data is the app data dir, and --persist=.codex puts
-# $HOME/.codex there too. The portal resolves exposures against the real
-# location with RESOLVE_NO_SYMLINKS, so those have to be rewritten to their
-# ~/.var/app/<id>/... form or the exposure silently yields nothing.
-app_root="$HOME/.var/app/${FLATPAK_ID:-com.openai.ChatGPT}"
+# A normal command receives the user's shell environment. The sandboxed
+# filesystem helper does not: exec-server preserves only PATH and temporary
+# directory variables before launching codex-linux-sandbox. Reconstruct the
+# Flatpak runtime values the portal shim itself needs. Bash resolves a bare
+# tilde through passwd when HOME is unset, avoiding another runtime dependency.
+uid="$EUID"
+if [ -z "${HOME:-}" ]; then
+  HOME=~
+  [ -n "$HOME" ] && [ "$HOME" != "~" ] ||
+    refuse "cannot determine HOME for uid $uid"
+  export HOME
+fi
+export FLATPAK_ID="${FLATPAK_ID:-com.openai.ChatGPT}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+
+# Flatpak maps data, config, cache, tmp and --persist paths from private
+# per-app storage to guest names such as /var/data and $HOME/.codex.
+# flatpak-spawn opens path exposures in the caller and the portal validates
+# that the same absolute host path names the same inode. The guest spelling
+# of a remapped mount fails that check, so all child-visible paths use their
+# ~/.var/app/<id>/... host spelling.
+app_root="$HOME/.var/app/$FLATPAK_ID"
 app_root_esc_data="${app_root}/data"
+app_root_esc_config="${app_root}/config"
+app_root_esc_cache="${app_root}/cache"
+app_root_esc_tmp="${app_root}/cache/tmp"
 app_root_esc_codex="${app_root}/.codex"
 host_path() {
   case "$1" in
@@ -161,10 +185,24 @@ host_path() {
     /var/data/*) printf '%s' "$app_root/data/${1#/var/data/}" ;;
     /var/config) printf '%s' "$app_root/config" ;;
     /var/config/*) printf '%s' "$app_root/config/${1#/var/config/}" ;;
+    /var/cache) printf '%s' "$app_root/cache" ;;
+    /var/cache/*) printf '%s' "$app_root/cache/${1#/var/cache/}" ;;
+    /var/tmp) printf '%s' "$app_root/cache/tmp" ;;
+    /var/tmp/*) printf '%s' "$app_root/cache/tmp/${1#/var/tmp/}" ;;
     "$HOME/.codex") printf '%s' "$app_root/.codex" ;;
     "$HOME/.codex"/*) printf '%s' "$app_root/.codex/${1#"$HOME"/.codex/}" ;;
     *) printf '%s' "$1" ;;
   esac
+}
+
+rewrite_mapped_paths() {
+  local value="$1"
+  value="${value//\/var\/data/$app_root_esc_data}"
+  value="${value//\/var\/config/$app_root_esc_config}"
+  value="${value//\/var\/cache/$app_root_esc_cache}"
+  value="${value//\/var\/tmp/$app_root_esc_tmp}"
+  value="${value//"$HOME"\/.codex/$app_root_esc_codex}"
+  printf '%s' "$value"
 }
 
 # --- translate ----------------------------------------------------------
@@ -184,9 +222,16 @@ expose() {
   local kind="$1" src="$2" dst="$3" tolerate="${4:-}" mapped
   # The portal exposes a path at its own location; it cannot remap.
   [ "$src" = "$dst" ] || refuse "$kind $src -> $dst (portal cannot remap paths)"
-  # "/" is not expressible: the child starts with the runtime and nothing
-  # of the host. Dropping it yields a tighter sandbox, not a looser one.
-  [ "$src" = "/" ] && return 0
+  # The portal cannot expose / itself. A read-only root bind does include all
+  # of the outer Flatpak's private state, though, so expose its host backing
+  # root read-only. More specific writable exposures remain nested overrides.
+  if [ "$src" = "/" ]; then
+    if [ "$kind" = "--sandbox-expose-path-ro" ] && [ -e "$app_root" ]; then
+      spawn+=("$kind=$app_root")
+      exposed+=("$app_root")
+    fi
+    return 0
+  fi
   # /tmp cannot be exposed at all -- it is a per-instance tmpfs, so the
   # child always gets a fresh private one. That matches what Codex is
   # after; set exclude_slash_tmp/exclude_tmpdir_env_var under
@@ -260,8 +305,8 @@ while [ "$i" -lt "$n" ]; do
     --proc|--dev|--mqueue|--dir|--remount-ro)
       i=$((i + 2)) ;;
 
-    --chdir) spawn+=("--directory=${argv[i+1]:-}"); have_chdir=1; i=$((i + 2)) ;;
-    --setenv) spawn+=("--env=${argv[i+1]:-}=${argv[i+2]:-}"); i=$((i + 3)) ;;
+    --chdir) spawn+=("--directory=$(host_path "${argv[i+1]:-}")"); have_chdir=1; i=$((i + 2)) ;;
+    --setenv) spawn+=("--env=${argv[i+1]:-}=$(rewrite_mapped_paths "${argv[i+2]:-}")"); i=$((i + 3)) ;;
     --unsetenv) spawn+=("--unset-env=${argv[i+1]:-}"); i=$((i + 2)) ;;
     --clearenv) spawn+=(--clear-env); i=$((i + 1)) ;;
     --die-with-parent) spawn+=(--watch-bus); i=$((i + 1)) ;;
@@ -331,7 +376,7 @@ if [ "$have_chdir" -eq 0 ]; then
   for p in ${exposed[@]+"${exposed[@]}"}; do
     case "$cwd" in "$p"|"$p"/*) dir="$cwd"; break ;; esac
   done
-  spawn+=("--directory=$dir")
+  spawn+=("--directory=$(host_path "$dir")")
 fi
 
 # Any fd the command still refers to has to survive the portal hop.
@@ -364,19 +409,8 @@ done
 # script handed to `sh -c`. It is a translation of the same directory to
 # its real location, not a change of policy.
 for j in "${!cmd[@]}"; do
-  v="${cmd[j]}"
-  v="${v//\/var\/data/$app_root_esc_data}"
-  v="${v//"$HOME"\/.codex/$app_root_esc_codex}"
-  cmd[j]="$v"
+  cmd[j]="$(rewrite_mapped_paths "${cmd[j]}")"
 done
-
-# Codex's generated script sources $HOME/.codex/shell_snapshots/<id>.sh.
-# `sh` is bash in POSIX mode, where a failed `.` is a special-builtin error
-# that kills the shell outright -- even inside the `if` the script wraps it
-# in. The script also redirects that error to /dev/null, so a missing
-# snapshot exits 1 with no output whatsoever, which is exactly the silent
-# failure this cost a day of bisecting.
-expose --sandbox-expose-path-ro "$HOME/.codex/shell_snapshots" "$HOME/.codex/shell_snapshots" try
 
 # The command's own binary must be reachable.
 case "${cmd[0]}" in

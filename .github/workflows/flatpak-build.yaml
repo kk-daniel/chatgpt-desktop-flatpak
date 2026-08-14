@@ -266,13 +266,15 @@ jobs:
           exit "$fail"
 
       # Codex's bubblewrap calls go through the shim, which re-expresses
-      # them as `flatpak-spawn --sandbox`. Only the translation is checked
-      # here: running the result needs the portal, and a CI container has no
-      # session bus to reach it through. See the script for what that leaves
-      # to be checked by hand on a desktop.
-      - name: Test bwrap shim translation
+      # them as `flatpak-spawn --sandbox`. CI checks the translation and the
+      # launcher-controlled log link. Portal execution and the packaged
+      # apply_patch cycle are additionally enforced when the test runs in a
+      # desktop session with a downloaded payload; headless CI reports them
+      # as skipped because it has no session bus.
+      - name: Test bwrap shim
         env:
           BRANCH: ${{ steps.clean-branch-name.outputs.branch }}
+          REQUIRE_BWRAP_PORTAL: 0
         run: '"./${APP_ID}/test-bwrap-shim.sh"'
 
       # The risky logic now runs on the user's machine at first launch, so

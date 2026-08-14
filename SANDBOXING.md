@@ -54,6 +54,13 @@ Each invocation then appends its original argv, the translated
 an empty log is itself an answer: it means Codex never reached the shim,
 which points at `PATH` rather than at the translation.
 
+Codex re-executes filesystem operations with a minimal environment containing
+only `PATH` and temporary-directory variables. `chatgpt.sh` therefore turns
+logging on by creating the target of the build-time `/app/bin/bwrap.log`
+symlink; the shim checks that file instead of `BWRAP_LOG` itself. The shim also
+reconstructs `HOME`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and the app
+ID before it contacts the Flatpak portal.
+
 The two models differ in shape, so the translation is not literal. Codex is
 *subtractive* — bind the whole root read-only, then carve out writable spots
 and mask directories with an empty tmpfs. The portal is *additive* — start
@@ -64,7 +71,7 @@ The mapping that follows from that:
 | --- | --- |
 | `--bind X X` / `--ro-bind X X` | `--sandbox-expose-path[-ro]=X` |
 | `--perms 555 --tmpfs X --remount-ro X` (mask) | `--sandbox-expose-path-ro=X` |
-| `--ro-bind / /` | dropped; the child gets the runtime root |
+| `--ro-bind / /` | expose `~/.var/app/<id>` read-only; the child gets the runtime root elsewhere |
 | `--bind /tmp /tmp` and `/tmp` masks | dropped; the child has its own tmpfs |
 | `--argv0 NAME` | replayed with `exec -a` |
 
@@ -89,20 +96,22 @@ exclude_tmpdir_env_var = true
 It only ever adds. An existing value of either key is left alone — including
 an explicit `false` — and any other settings in the file are preserved.
 
-Flatpak also maps some directories to paths that do not exist on the host —
-`/var/data`, and `$HOME/.codex` under `--persist`. The portal resolves
-exposures against the real `~/.var/app/<id>/…` location, so the shim exposes
-them there and rewrites the same paths throughout the command it hands over.
-One pass fixes the binary's own path, the paths inside
-`--permission-profile`, and the ones embedded in the shell script Codex
-hands to `sh -c`.
+Flatpak maps several guest paths into private per-app host storage:
+`/var/data`, `/var/config`, `/var/cache`, `/var/tmp`, and `$HOME/.codex`
+under `--persist`. `flatpak-spawn` opens an `O_PATH` fd in the caller and the
+portal verifies that the same absolute path on the host names the same inode.
+The guest spelling of a remapped mount fails that check, so exposures must use
+the real `~/.var/app/<id>/…` path.
 
-The shim also exposes `~/.codex/shell_snapshots` read-only. Codex's
-generated script sources the session snapshot from there, and `sh` is bash
-in POSIX mode, where a failed `.` is a special-builtin error that kills the
-shell outright -- inside the `if` the script wraps it in, and with the error
-redirected to `/dev/null`. A missing snapshot therefore exits 1 with no
-output at all.
+A native `--ro-bind / /` makes all of those paths readable. The shim mirrors
+that by exposing the complete `~/.var/app/<id>` root read-only instead of
+special-casing `shell_snapshots`, `attachments`, or any other current
+subdirectory. More specific writable binds remain nested overrides.
+
+The same mapping is applied to working directories, environment values and
+every command argument, including paths embedded in the shell script Codex
+hands to `sh -c`. Pasted text, uploaded files and future private-state paths
+therefore work without per-feature exposure rules.
 
 ### The command Codex actually asked for
 
@@ -170,16 +179,24 @@ Each command starts a fresh Flatpak instance, costing a few hundred
 milliseconds, and the child has no session bus (flatpak disables it for
 `--sandbox`), so commands needing D-Bus will not work.
 
-That table is also the part CI cannot check. Reaching the portal needs a
-session bus, and the build container has none — `flatpak-spawn` gets as far
-as `Cannot spawn a message bus without a machine-id` and stops. So
-`test-bwrap-shim.sh` asserts the *translation* instead: it runs the
-installed shim with `BWRAP_LOG=1` and compares the line logged just before
-the spawn against the expected arguments. That reaches most of the parser
-in its real environment, but stops at the portal's door — and the flags
-carrying a file descriptor stay out of reach too, since `flatpak run` has
-nowhere to hand one in. Whether the child is actually confined has to be
-re-measured on a desktop after any change to the translation:
+That table is also the part headless CI cannot check. Reaching the portal
+needs a session bus, and the build container has none — `flatpak-spawn` gets
+as far as `Cannot spawn a message bus without a machine-id` and stops.
+`test-bwrap-shim.sh` therefore always asserts the *translation*: it compares
+the line logged just before the spawn against the expected arguments and
+repeats the capability probe with the same minimal environment as Codex's
+filesystem helper. It also tests the launcher's logging switch through the
+installed `/app/bin/bwrap.log` link.
+
+On a desktop with a session bus, the same test goes further: the minimal
+filesystem-helper environment must execute `/bin/true` through the portal,
+and, when the ChatGPT payload has been downloaded, the packaged `apply_patch`
+must complete a create/update/delete sequence through three consecutive bwrap
+calls. Set `REQUIRE_BWRAP_PORTAL=1` and `REQUIRE_CODEX_APPLY_PATCH=1` to turn
+either conditional check into a required one. File-descriptor flags remain
+out of reach because `flatpak run` has nowhere to hand one in. Whether the
+child is actually confined still has to be re-measured on a desktop after
+any change to the translation:
 
 ```bash
 flatpak run --command=bwrap com.openai.ChatGPT --unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/sh -c 'echo ok; ls /mnt'
