@@ -70,6 +70,10 @@ fi
 if ! userns_err=$(unshare --user --map-root-user true 2>&1); then
   note "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>&1)"
   note "unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 'not present')"
+  # A uid_map write refused while the unshare itself succeeded is this, on
+  # Ubuntu 24.04 and derivatives: the namespace is created without the
+  # capabilities it would normally carry.
+  note "apparmor_restrict_unprivileged_userns: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 'not present')"
   note "uid=$(id -u) in $(readlink /proc/self/ns/user 2>&1)"
   skip_all "cannot create a user namespace, so no broker can work: $userns_err"
 fi

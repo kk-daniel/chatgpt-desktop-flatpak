@@ -351,6 +351,18 @@ jobs:
           # does and print both sides of the comparison. Root manages it -- the
           # build above proves that -- so if the tester cannot, the difference
           # is the interesting part.
+          # Ubuntu 24.04, which the runner host is, ships an AppArmor
+          # restriction on unprivileged user namespaces. It does not block the
+          # unshare -- it strips the capabilities the new namespace would
+          # normally carry, so uid_map cannot be written and the failure reads
+          # "write failed /proc/self/uid_map: Operation not permitted" while
+          # root sails through. The container is privileged, so the sysctl can
+          # be turned off from in here.
+          apparmor=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$apparmor" ]; then
+            echo "apparmor_restrict_unprivileged_userns=$(cat "$apparmor")"
+            echo 0 > "$apparmor" || echo "could not relax it"
+          fi
           echo "max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces)"
           unshare --user --map-root-user true \
             && echo "root: userns ok" || echo "root: userns FAILED"
