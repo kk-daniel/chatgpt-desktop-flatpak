@@ -73,7 +73,110 @@ def call(nr, args):
     return rc, ctypes.get_errno()
 
 
+REFUSED = {"EPERM", "EAFNOSUPPORT"}
+
+
+def report_filter_state():
+    """Whether a seccomp filter is installed at all, and how many.
+
+    This is the difference between "flatpak's policy is absent here" and
+    "flatpak's policy is not what this file claims". Without it, a probe that
+    reaches the kernel is ambiguous, and the two readings call for opposite
+    responses: one is an environment that cannot check parity, the other is a
+    wrong entry in FLATPAK_BLOCKLIST.
+    """
+    mode = filters = "unknown"
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("Seccomp:"):
+                    mode = line.split()[1]
+                elif line.startswith("Seccomp_filters:"):
+                    filters = line.split()[1]
+    except OSError:
+        pass
+    print(f"_seccomp_mode\t{mode}")
+    print(f"_seccomp_filters\t{filters}")
+
+
+def read_probe_file(path):
+    results, meta = {}, {}
+    with open(path) as f:
+        for line in f:
+            name, _, value = line.rstrip("\n").partition("\t")
+            if name.startswith("_"):
+                meta[name] = value
+            elif name:
+                results[name] = value
+    return results, meta
+
+
+def compare(app_path, broker_path):
+    """Compare the two sides and say which direction any difference runs in.
+
+    They are not symmetric. The broker allowing something the app refuses widens
+    the sandbox and is always a failure. The broker refusing something the app
+    allows only breaks a command -- bad, but it depends on the flatpak and kernel
+    in front of it, so it is reported and only fails where the app's own filter
+    is actually in play.
+    """
+    app, app_meta = read_probe_file(app_path)
+    broker, _ = read_probe_file(broker_path)
+
+    # An empty side is not agreement. Without this, a probe that failed to run
+    # inside the app at all -- no flatpak, a bad ref, a crash -- compared clean
+    # and reported "identical", which is the most misleading answer available.
+    for side, results in (("app", app), ("broker", broker)):
+        if not results:
+            print(f"the {side} side produced no results, so there is nothing "
+                  f"to compare")
+            return 1
+
+    filters = app_meta.get("_seccomp_filters", "unknown")
+    print(f"the app reports seccomp mode {app_meta.get('_seccomp_mode')} "
+          f"with {filters} filter(s)")
+
+    wider, narrower = [], []
+    for name, app_result in sorted(app.items()):
+        broker_result = broker.get(name, "missing")
+        if app_result == broker_result:
+            continue
+        if app_result in REFUSED and broker_result not in REFUSED:
+            wider.append(f"{name}: app {app_result}, broker {broker_result}")
+        else:
+            narrower.append(f"{name}: app {app_result}, broker {broker_result}")
+
+    status = 0
+    if wider:
+        print("\nthe broker is WIDER than the app -- this must never happen:")
+        for line in wider:
+            print(f"  {line}")
+        status = 1
+
+    if narrower:
+        print("\nthe broker refuses more than the app does here:")
+        for line in narrower:
+            print(f"  {line}")
+        if filters in ("0", "unknown"):
+            print("\n  The app has no seccomp filter in this environment, so it"
+                  "\n  cannot say what flatpak's policy is and these are not"
+                  "\n  evidence of a wrong entry. Not treated as a failure.")
+        else:
+            print("\n  The app does have a filter, so flatpak's policy is not"
+                  "\n  what FLATPAK_BLOCKLIST claims and one of these entries is"
+                  "\n  refusing something the app is allowed to do.")
+            status = 1
+
+    if not wider and not narrower:
+        print("\nidentical: the broker refuses exactly what the app refuses")
+    return status
+
+
 def main():
+    if "--compare" in sys.argv:
+        i = sys.argv.index("--compare")
+        sys.exit(compare(sys.argv[i + 1], sys.argv[i + 2]))
+
     if "--filtered" in sys.argv:
         sys.path.insert(0, os.path.join(
             os.path.dirname(os.path.realpath(__file__))))
@@ -93,6 +196,8 @@ def main():
     for name, request in IOCTL_PROBES:
         _, err = call(SYS_ioctl, (1023, request, 0))
         print(f"{name}\t{errno_name(err)}")
+
+    report_filter_state()
 
 
 def errno_name(err):

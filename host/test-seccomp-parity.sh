@@ -25,14 +25,10 @@ python3 "$HERE/test-seccomp-parity.py" --filtered | tee "$OUT/broker" | sed 's/^
 
 echo
 echo "== differences =="
-if diff -u "$OUT/app" "$OUT/broker" > "$OUT/diff"; then
-  echo "  none: the broker refuses exactly what the app refuses"
-  echo "  (the namespace group is not probed here -- it is the one"
-  echo "   documented difference, and host/test-broker.py asserts it)"
-else
-  sed '1,2d' "$OUT/diff" | sed 's/^/  /'
-  echo
-  echo "  Each line is a syscall where the two policies disagree."
-  echo "  Update BLOCKED_EPERM in host/seccomp_policy.py to match the app."
-  exit 1
-fi
+# Compared by direction rather than by diff: the two are not symmetric, and a
+# plain diff cannot say which way a difference runs. The namespace group is not
+# probed here at all -- it is the one documented difference, and
+# host/test-broker.py asserts it stays allowed.
+python3 "$HERE/test-seccomp-parity.py" --compare "$OUT/app" "$OUT/broker" |
+  sed 's/^/  /'
+exit "${PIPESTATUS[0]}"
