@@ -113,11 +113,21 @@ Two things, both consequences of the goal rather than oversights.
 **The namespace syscalls.** Commands do not run under flatpak's seccomp filter,
 because that filter is exactly what stops bubblewrap. Most of the policy is put
 back by the broker immediately before exec — the kernel keyring, `ptrace`,
-`perf_event_open`, the NUMA calls, the non-IP socket families — and seccomp
-filters survive `execve` and namespace creation, so one filter covers
-bubblewrap, Codex's helper and the command. What is actually given up is the
-namespace group: `clone`, `unshare`, `setns`, `mount`, `umount2`, `pivot_root`,
-`chroot`, `clone3`.
+`perf_event_open`, the NUMA calls, `modify_ldt`, the non-IP socket families, and
+the two terminal `ioctl` requests behind CVE-2017-5226 and CVE-2023-28100 —
+and seccomp filters survive `execve` and namespace creation, so one filter
+covers bubblewrap, Codex's helper and the command. What is actually given up is
+the namespace group: `clone`, `unshare`, `setns`, `mount`, `umount2`,
+`pivot_root`, `chroot`, `clone3`.
+
+That list is a claim about flatpak's source, so it is checked rather than
+trusted, in both directions. `host/seccomp_policy.py` carries flatpak's
+blocklist as a separate table that is deliberately not derived from the
+broker's own; `host/test-broker.py` asserts the filter refuses all of it, and
+`host/test-seccomp-parity.sh` asserts the running app refuses all of it too.
+Refusing something flatpak allows would break a Codex command for no visible
+reason, and allowing something flatpak refuses would widen the sandbox
+silently — neither is apparent by reading.
 
 Any code inside the app can reach the broker's socket, so the app's effective
 syscall surface becomes its own plus that group. That is the honest statement
@@ -157,10 +167,26 @@ broker. The client recognises that errno and says what it means.
 The broker arrives in A as uid 0 with a full capability set, and bubblewrap
 passes that straight to the command — measured, `child uid=0 CapEff
 000001ffffffffff`, which is a great deal more than Codex asked for. So before
-exec the broker creates one more user namespace mapping that 0 back to the app's
-own uid, drops every capability and sets `no_new_privs`. Doing it there rather
-than by adding `--uid` to the command line is what lets Codex's arguments reach
-bubblewrap literally unmodified.
+exec the broker creates one more user namespace **C** mapping that 0 back to the
+app's own uid, and sets `no_new_privs`. Doing it there rather than by adding
+`--uid` to the command line is what lets Codex's arguments reach bubblewrap
+literally unmodified.
+
+C is where the boundary is, not the capability set. Capabilities held in C are
+not capabilities in A or on the host, and mounting in the app's own mount
+namespace stays refused whatever is held, because `may_mount()` asks for
+`CAP_SYS_ADMIN` in the namespace that *owns* that mount namespace — A — where a
+process in C has none. bubblewrap therefore has to unshare its own mount
+namespace under C, which is what it does.
+
+The capabilities are dropped in C as well at any normal uid, which is defence in
+depth and not the load-bearing control. The exception is an app running as
+root: bubblewrap then reads euid 0 as privileged and takes a path needing
+`CAP_SYS_ADMIN` to unshare its mount namespace and `CAP_SETUID` to write its id
+maps, so dropping them leaves it unable to build a sandbox at all. They are kept
+in that case, scoped to C, and bubblewrap drops privileges for the command
+either way — which `host/test-broker-live.sh` checks by reading the command's
+`CapEff`.
 
 ## What disappeared with the portal
 

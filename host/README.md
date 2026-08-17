@@ -67,11 +67,17 @@ Two things, and both are consequences of the goal rather than oversights.
 **The namespace syscalls.** Commands cannot run under flatpak's seccomp filter,
 because that filter is precisely what stops bubblewrap. Everything else in
 flatpak's policy is reinstated by `seccomp_policy.py` immediately before exec —
-the keyring, `ptrace`, `perf_event_open`, the NUMA calls, the non-IP socket
-families. What is actually given up is `clone`, `unshare`, `setns`, `mount`,
-`umount2`, `pivot_root`, `chroot` and `clone3`. Any code inside the app can
-reach the socket, so the app's effective syscall surface becomes its own plus
-that group.
+the keyring, `ptrace`, `perf_event_open`, the NUMA calls, `modify_ldt`, the
+non-IP socket families, and the terminal `ioctl` requests behind CVE-2017-5226
+and CVE-2023-28100. What is actually given up is `clone`, `unshare`, `setns`,
+`mount`, `umount2`, `pivot_root`, `chroot` and `clone3`. Any code inside the app
+can reach the socket, so the app's effective syscall surface becomes its own
+plus that group.
+
+`seccomp_policy.py` keeps flatpak's blocklist as a table of its own, not derived
+from the broker's, so the comparison is a comparison: `test-broker.py` asserts
+the filter refuses all of it and `test-seccomp-parity.sh` asserts the app does
+too. A list computed from our own could only ever confirm itself.
 
 **`max_user_namespaces`.** `--disable-userns` works by exhausting the quota in
 A, and the inner bwrap needs two namespaces. The broker raises it and does not

@@ -24,9 +24,16 @@ libc = ctypes.CDLL(None, use_errno=True)
 # (name, syscall number, arguments). A blocked call returns EPERM from seccomp;
 # an allowed one gets as far as the kernel and fails on its arguments instead,
 # which is what makes the two distinguishable.
+# Written from flatpak's own blocklists, not from host/seccomp_policy.py. A list
+# derived from ours could only confirm itself, and the direction that matters --
+# flatpak refuses it and we do not -- would never show up.
+#
+# The namespace group is left out because it is the documented difference:
+# host/test-broker.py asserts those stay allowed.
 PROBES = [
     ("syslog", 103, (9, None, 0)),            # SYSLOG_ACTION_SIZE_UNREAD
     ("uselib", 134, (0,)),
+    ("modify_ldt", 154, (0, 0, 0)),           # func 0 = read, harmless
     ("acct", 163, (0,)),                      # NULL disables accounting
     ("quotactl", 179, (0, 0, 0, 0)),
     ("add_key", 248, (0, 0, 0, 0, 0)),
@@ -40,6 +47,18 @@ PROBES = [
     ("ptrace", 101, (2, 0, 0, 0)),            # PTRACE_PEEKTEXT on pid 0
     ("personality", 135, (0xFFFFFFFF,)),      # query, does not change anything
     ("perf_event_open", 298, (0, 0, 0, 0, 0)),
+]
+
+# ioctl is filtered by request rather than refused, so it needs its own probes.
+# Both are CVE fixes flatpak carries. Sent on a closed descriptor so nothing
+# happens even where the request is permitted: an allowed one answers EBADF,
+# a filtered one answers EPERM before the descriptor is ever looked at.
+SYS_ioctl = 16
+IOCTL_PROBES = [
+    ("ioctl TIOCSTI", 0x5412),
+    ("ioctl TIOCLINUX", 0x541C),
+    # A control: this one must stay reachable, or we have broken ioctl wholesale.
+    ("ioctl TCGETS", 0x5401),
 ]
 
 # The socket-family rule, which is an argument check rather than a flat block.
@@ -69,6 +88,12 @@ def main():
         _, err = call(SYS_socket, (family, 1, 0))
         print(f"socket({name})\t{errno_name(err)}")
 
+    # 1023 is chosen to be closed: EBADF means the request reached the kernel,
+    # EPERM means the filter stopped it first.
+    for name, request in IOCTL_PROBES:
+        _, err = call(SYS_ioctl, (1023, request, 0))
+        print(f"{name}\t{errno_name(err)}")
+
 
 def errno_name(err):
     if err == 0:
@@ -77,7 +102,7 @@ def errno_name(err):
     # was refused on the socket type, so the family itself was allowed through.
     return {1: "EPERM", 13: "EACCES", 14: "EFAULT", 22: "EINVAL", 3: "ESRCH",
             97: "EAFNOSUPPORT", 94: "ESOCKTNOSUPPORT", 93: "EPROTONOSUPPORT",
-            38: "ENOSYS"}.get(err, f"errno {err}")
+            38: "ENOSYS", 9: "EBADF"}.get(err, f"errno {err}")
 
 
 if __name__ == "__main__":

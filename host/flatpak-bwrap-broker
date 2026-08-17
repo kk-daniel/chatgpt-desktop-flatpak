@@ -87,6 +87,14 @@ MAX_ITEMS = 8192
 MAX_FDS = 64
 SOCKET_BUFFER = 8 << 20
 
+# Descriptor numbers the client may ask for. They are numbers of descriptors
+# genuinely open in the caller, so they are bounded by its own RLIMIT_NOFILE;
+# anything far above that is not a real request. Bounding them keeps the
+# reason pipe placeable out of reach, and turns a wild number into a stated
+# refusal rather than an OverflowError from fcntl.
+MAX_FD_NUMBER = 4096
+REASON_FD = MAX_FD_NUMBER + 8
+
 # --- syscalls ------------------------------------------------------------
 
 CLONE_NEWNS = 0x00020000
@@ -254,6 +262,12 @@ def parse_exec(data):
         raise Refused("empty argv")
     if len(request["fds"]) > MAX_FDS:
         raise Refused("too many file descriptors")
+    for number in request["fds"]:
+        if number > MAX_FD_NUMBER:
+            raise Refused(f"descriptor number {number} is above the "
+                          f"{MAX_FD_NUMBER} limit")
+    if len(set(request["fds"])) != len(request["fds"]):
+        raise Refused("the same descriptor number appears twice")
     return request
 
 
@@ -480,13 +494,24 @@ def raise_userns_limit():
 
 
 def become_unprivileged(uid, gid):
-    """Map this namespace's uid back down and give up every capability.
+    """Move into a nested user namespace C and give up what is safe to lose.
 
-    We are uid 0 in A with a full capability set. bubblewrap treats euid 0 as
-    privileged and passes that on to the command it runs. A nested namespace
-    that maps 0 back to the app's own uid restores the shape the app has, and
-    -- this is the point -- it does so before bwrap is exec'd, so Codex's
-    arguments still reach bwrap exactly as Codex wrote them.
+    We arrive in A -- the namespace that owns the app's mounts -- as uid 0 with
+    a full capability set. Measured, bubblewrap run from there hands its child
+    the same thing: CapEff 000001ffffffffff, which is a great deal more than
+    Codex asked for, and capabilities in A are real because A owns the mounts.
+
+    So the first thing is to get out of A into a child namespace C, mapping
+    that 0 back to the app's own uid. Doing it here rather than by adding
+    --uid to the command line is what lets Codex's arguments reach bubblewrap
+    exactly as written.
+
+    C is where the boundary actually is. Capabilities held in C are not
+    capabilities in A or on the host, and mounting in the app's own mount
+    namespace stays refused whatever we hold, because may_mount() asks for
+    CAP_SYS_ADMIN in the namespace that *owns* that mount namespace -- A --
+    and a process in C has none there. bubblewrap therefore has to unshare its
+    own mount namespace under C, which is exactly what it does.
     """
     outer = os.getuid()
     outer_gid = os.getgid()
@@ -502,7 +527,23 @@ def become_unprivileged(uid, gid):
     with open("/proc/self/gid_map", "w") as f:
         f.write(f"{gid} {outer_gid} 1\n")
 
-    drop_all_capabilities()
+    if uid == 0:
+        # The app itself runs as root -- unusual, but it is what CI does, and
+        # bubblewrap then reads euid 0 as "privileged" and takes a path that
+        # needs CAP_SYS_ADMIN to unshare its mount namespace and CAP_SETUID to
+        # write its id maps. Dropping those leaves it unable to build a sandbox
+        # at all: first "Creating new namespace failed", then, once the
+        # namespace is asked for explicitly, "setting up uid map: Permission
+        # denied". Keeping them is sound for the reason in the docstring -- they
+        # are confined to C -- and bubblewrap drops privileges for the command
+        # regardless, which test-broker-live.sh asserts by reading CapEff.
+        libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+    else:
+        # At any other uid bubblewrap knows it is unprivileged and needs none of
+        # this, so drop it. Defence in depth rather than the load-bearing
+        # control -- and not merely optional: bubblewrap refuses to start with
+        # capabilities it did not expect at a non-zero uid.
+        drop_all_capabilities()
 
 
 def install_fds(received, wanted, preserve=None):
@@ -514,6 +555,14 @@ def install_fds(received, wanted, preserve=None):
     Everything is parked above the highest target first. Moving them one at a
     time would let a request that maps 4->3 and 3->4 clobber one with the
     other, and even a plain dup() could land on a number still to be written.
+
+    The invariant afterwards is that the command holds exactly the descriptors
+    the client sent, plus stdio, and nothing else. In particular the command's
+    stdin, stdout and stderr are either what the client sent or /dev/null, and
+    never something inherited from the broker: this used to skip fds 0-2 in the
+    closing sweep, which the real client hid by always sending all three, but a
+    request that omitted one left the broker's own stdio in place -- under
+    systemd, its journald socket.
     """
     base = max(wanted) + 10 if wanted else 10
     parked = [fcntl.fcntl(fd, fcntl.F_DUPFD, base) for fd in received]
@@ -524,7 +573,20 @@ def install_fds(received, wanted, preserve=None):
         os.dup2(temp, target, inheritable=True)
         os.close(temp)
 
-    keep = set(wanted)
+    # Bound to /dev/null rather than left closed. A process exec'd with 0, 1 or
+    # 2 closed is its own hazard: the next open() lands on the free number and a
+    # write meant for stdout goes into a file.
+    for fd in (0, 1, 2):
+        if fd in wanted:
+            continue
+        spare = os.open(os.devnull, os.O_RDWR)
+        if spare != fd:
+            os.dup2(spare, fd, inheritable=True)
+            os.close(spare)
+        else:
+            os.set_inheritable(fd, True)
+
+    keep = set(wanted) | {0, 1, 2}
     if preserve is not None:
         keep.add(preserve)
     for name in os.listdir("/proc/self/fd"):
@@ -532,7 +594,7 @@ def install_fds(received, wanted, preserve=None):
             fd = int(name)
         except ValueError:
             continue
-        if fd not in keep and fd > 2:
+        if fd not in keep:
             try:
                 os.close(fd)
             except OSError:
@@ -626,9 +688,9 @@ def run_request(request, fds, mnt, joinable, uid, gid, bwrap_path, reason_fd):
     except OSError:
         os.chdir("/")
 
-    # Moved well out of the way first: the client chooses the target numbers,
-    # and one of them could otherwise be this pipe.
-    reason_fd = fcntl.fcntl(reason_fd, fcntl.F_DUPFD, 800)
+    # Moved above every number the client is allowed to ask for, so a target
+    # can no longer land on this pipe and take the explanation with it.
+    reason_fd = fcntl.fcntl(reason_fd, fcntl.F_DUPFD, REASON_FD)
 
     # Kept open across the descriptor shuffle so an exec failure can still be
     # explained, and closed by the kernel at exec so the command never sees it.

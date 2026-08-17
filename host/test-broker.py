@@ -19,11 +19,13 @@ Run: python3 host/test-broker.py
 """
 
 import ctypes
+import fcntl
 import importlib.machinery
 import importlib.util
 import os
 import struct
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -65,9 +67,11 @@ BPF_LD, BPF_JMP, BPF_RET = 0x00, 0x05, 0x06
 BPF_W, BPF_ABS, BPF_JEQ, BPF_JGE, BPF_K = 0x00, 0x20, 0x10, 0x30, 0x00
 
 
-def run_filter(program, nr, arch=seccomp_policy.AUDIT_ARCH_X86_64, arg0=0):
+def run_filter(program, nr, arch=seccomp_policy.AUDIT_ARCH_X86_64, arg0=0,
+               arg1=0):
     """A cBPF interpreter, so the filter is checked by execution not by eye."""
-    data = struct.pack("<IIQ6Q", nr & 0xFFFFFFFF, arch, 0, arg0, 0, 0, 0, 0, 0)
+    data = struct.pack("<IIQ6Q", nr & 0xFFFFFFFF, arch, 0,
+                       arg0, arg1, 0, 0, 0, 0)
     instructions = [program[i:i + 8] for i in range(0, len(program), 8)]
 
     acc = 0
@@ -117,10 +121,30 @@ def test_seccomp_program():
         check(run_filter(prog, seccomp_policy.SYS_socket, arg0=family) == eaf,
               f"socket family {family} refused")
 
+    # ioctl is filtered by request, not refused outright: the two terminal
+    # requests flatpak blocks are CVE fixes (TIOCSTI CVE-2017-5226, TIOCLINUX
+    # CVE-2023-28100) and everything else about ioctl has to keep working.
+    for request in sorted(seccomp_policy.BLOCKED_IOCTLS):
+        check(run_filter(prog, seccomp_policy.SYS_ioctl, arg1=request) == eperm,
+              f"ioctl request {request:#x} is refused")
+    for request in (0x5401, 0x541B, 0x5413, 0x00):  # TCGETS, FIONREAD, ...
+        check(run_filter(prog, seccomp_policy.SYS_ioctl, arg1=request) == allow,
+              f"ioctl request {request:#x} still allowed")
+
     check(run_filter(prog, 1, arch=0x40000003) == kill,
           "a foreign architecture is killed, not allowed")
     check(run_filter(prog, 0x40000000 | 1) == kill,
           "an x32 syscall number is killed, not allowed")
+
+    # The claim SANDBOXING.md makes is parity with flatpak minus the namespace
+    # group. FLATPAK_BLOCKLIST is written from flatpak's source and is
+    # deliberately not derived from our own list, so this can catch the one
+    # direction that widens the sandbox: flatpak refuses it, we do not.
+    for nr, name in sorted(seccomp_policy.FLATPAK_BLOCKLIST.items()):
+        if nr in seccomp_policy.NEEDED_BY_BWRAP:
+            continue
+        check(run_filter(prog, nr) == eperm,
+              f"flatpak refuses {name} ({nr}), so this must too")
 
     # Nothing above reaches the blocklist by accident: verify the socket path
     # rejoins in the right place by checking a blocked syscall still blocks
@@ -269,10 +293,131 @@ def test_args_expansion():
         os.close(reader)
 
 
+def surviving_fds(wanted, supplied=None, preserve=None):
+    """What a command would actually inherit, measured in a forked child.
+
+    install_fds() runs for real and /proc/self/fd is read afterwards. This is
+    the layer that could have caught the stdio leak and did not exist: unlike
+    the namespace entry, none of it needs an app or a broker.
+    """
+    # The result cannot come back over a pipe: install_fds() closes every
+    # descriptor it was not told to keep, and the pipe would be one of them.
+    # So the child reports through a path it opens *after* the shuffle.
+    handle, report = tempfile.mkstemp()
+    os.close(handle)
+
+    pid = os.fork()
+    if pid == 0:
+        try:
+            # Stand-ins for what the broker holds at this point -- the socket,
+            # the pidfd, the namespace descriptors. None of them may survive.
+            # A named file rather than /dev/null so that a descriptor the
+            # client supplied is distinguishable from one filled in for it.
+            received = [os.open(report, os.O_RDONLY) for _ in wanted]
+            kept = None
+            if preserve is not None:
+                kept = fcntl.fcntl(os.open(os.devnull, os.O_RDONLY),
+                                   fcntl.F_DUPFD, preserve)
+            broker.install_fds(received, wanted, preserve=kept)
+            live = sorted(int(n) for n in os.listdir("/proc/self/fd")
+                          if n.isdigit())
+            # Where 0, 1 and 2 point matters as much as whether they exist:
+            # the invariant is that they are the client's or /dev/null, never
+            # something inherited.
+            where = []
+            for fd in (0, 1, 2):
+                try:
+                    where.append(f"{fd}={os.readlink(f'/proc/self/fd/{fd}')}")
+                except OSError:
+                    where.append(f"{fd}=absent")
+            with open(report, "w") as f:
+                f.write(",".join(str(n) for n in live) + "|" + ",".join(where))
+        except BaseException as e:  # noqa: BLE001
+            try:
+                with open(report, "w") as f:
+                    f.write(f"E{e}")
+            except OSError:
+                pass
+        os._exit(0)
+
+    os.waitpid(pid, 0)
+    with open(report) as f:
+        out = f.read()
+    os.unlink(report)
+    return out
+
+
+def test_install_fds():
+    print("\n== descriptor installation ==")
+
+    # The listing includes the fd os.listdir opened, so compare against a set
+    # that tolerates one extra transient number.
+    def survives(out):
+        if out.startswith("E") or not out:
+            return out or "E<no report>", ""
+        listing, _, stdio = out.partition("|")
+        return {int(n) for n in listing.split(",") if n}, stdio
+
+    got, _ = survives(surviving_fds([0, 1, 2]))
+    check(isinstance(got, set) and {0, 1, 2} <= got,
+          "the ordinary case installs stdio")
+
+    # The leak this fixes: a client that omits stdio used to leave the broker's
+    # own in place, and under systemd that is its journald socket. The command
+    # must get /dev/null instead -- and must not get *nothing*, or the next
+    # open() lands on fd 0 and a write meant for stdout goes into a file.
+    got, stdio = survives(surviving_fds([]))
+    check(isinstance(got, set) and {0, 1, 2} <= got,
+          "an empty table still leaves 0,1,2 open, not closed")
+    check(all(f"{fd}=/dev/null" in stdio for fd in (0, 1, 2)),
+          f"an omitted stdio becomes /dev/null, not the broker's ({stdio})")
+
+    # And a partial table: the supplied one is the client's, the rest /dev/null.
+    got, stdio = survives(surviving_fds([1]))
+    check("1=/dev/null" not in stdio and "0=/dev/null" in stdio
+          and "2=/dev/null" in stdio,
+          f"a partial table fills only the gaps ({stdio})")
+
+    # Crossed targets: 3->4 and 4->3 in one request must not clobber.
+    got, _ = survives(surviving_fds([4, 3]))
+    check(isinstance(got, set) and {3, 4} <= got,
+          "crossed target numbers both survive")
+
+    # Nothing above the requested set survives, so the socket, pidfd and
+    # namespace descriptors cannot reach the command.
+    got, _ = survives(surviving_fds([0, 1, 2, 7]))
+    check(isinstance(got, set) and not {f for f in got if 7 < f < 100},
+          "no descriptor above the requested set survives")
+
+    # The reason pipe is kept but must be beyond anything a client may ask for.
+    got, _ = survives(surviving_fds([0, 1, 2], preserve=broker.REASON_FD))
+    check(isinstance(got, set) and broker.REASON_FD in got,
+          "the reason pipe survives the shuffle")
+    check(broker.REASON_FD > broker.MAX_FD_NUMBER,
+          "the reason pipe is above every number a client may request")
+
+
+def test_fd_table_limits():
+    print("\n== descriptor table validation ==")
+    for table, why in (
+        ([0, 1, 2, broker.MAX_FD_NUMBER + 1], "a number above the limit"),
+        ([0, 1, 2, 0xFFFFFFFF], "an absurd number"),
+        ([0, 1, 1], "a repeated number"),
+    ):
+        request = client.build_request(["bwrap", "--version"], table)
+        try:
+            broker.parse_exec(request)
+            check(False, f"{why} is refused")
+        except broker.Refused:
+            check(True, f"{why} is refused")
+
+
 def main():
     test_seccomp_program()
     test_seccomp_install()
     test_protocol_roundtrip()
+    test_install_fds()
+    test_fd_table_limits()
     test_descriptor_scan()
     test_args_expansion()
 
