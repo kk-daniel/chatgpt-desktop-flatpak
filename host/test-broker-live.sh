@@ -214,7 +214,12 @@ out=$(in_app --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
   printf x > /tmp/masked/f && echo tmpfs-writable
   : > /dev/null && echo dev-ok
   test -d /proc/1 && echo proc-ok
-  [ "$(ls /proc | grep -c "^[0-9]*$")" -le 3 ] && echo pidns-isolated')
+  # Not a count of numeric /proc entries: the command substitution and pipeline
+  # needed to take that count are themselves processes in the namespace, so the
+  # number raced and passed locally by luck. pid 1 being bubblewrap says the
+  # same thing deterministically -- without a fresh pid namespace, pid 1 is the
+  # init of the app rather than ours.
+  [ "$(cat /proc/1/comm)" = bwrap ] && echo pidns-isolated')
 for want in tmpfs-ok perms-ok tmpfs-writable dev-ok proc-ok pidns-isolated; do
   if printf '%s' "$out" | grep -qx "$want"; then
     ok "$want"
@@ -268,7 +273,10 @@ out=$(printf 'from-stdin' | flatpak run --command=bwrap "$REF" \
   --unshare-user --ro-bind / / --chdir / -- /bin/cat 2>/dev/null)
 [ "$out" = "from-stdin" ] && ok "stdin reaches the command" || bad "stdin did not reach the command" "$out"
 
-err=$(in_app --ro-bind / / --chdir / -- /bin/sh -c 'echo to-stderr >&2' 2>&1 >/dev/null)
+# Not in_app: it folds stderr into stdout, so redirecting stdout away here threw
+# the very thing being tested into /dev/null and the test could never pass.
+err=$(flatpak run --command=bwrap "$REF" --unshare-user --ro-bind / / --chdir / -- \
+  /bin/sh -c 'echo to-stderr >&2' 2>&1 >/dev/null)
 printf '%s' "$err" | grep -q to-stderr && ok "stderr comes back" || bad "stderr was lost" "$err"
 
 echo
@@ -306,10 +314,13 @@ fi
 
 echo
 echo "== seccomp policy parity with the app =="
-if bash "$HERE/test-seccomp-parity.sh" "$APP" >/dev/null 2>&1; then
+if parity=$(bash "$HERE/test-seccomp-parity.sh" "$REF" 2>&1); then
   ok "the broker refuses exactly what the app refuses"
 else
-  bad "the seccomp policy differs from the app's" "run host/test-seccomp-parity.sh"
+  # Print it. Suppressing the output left "the policy differs" with no way to
+  # tell which syscall, which is the whole content of the finding.
+  bad "the seccomp policy differs from the app's"
+  printf '%s\n' "$parity" | sed 's/^/        /'
 fi
 
 echo

@@ -739,9 +739,21 @@ def run_request(request, fds, mnt, joinable, uid, gid, bwrap_path, reason_fd):
 def serve(conn, app_id, bwrap_path):
     pidfd = procfd = None
     opened = []
+    fds = []
     try:
         pidfd, pid = peer_pidfd(conn)
         procfd = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY)
+
+        # The request is read before anything is decided about the caller, and
+        # the order is not cosmetic. A refusal raised while the request datagram
+        # still sat unread in the receive queue meant closing the socket with
+        # data queued on it, and the kernel answers that with a reset: the
+        # client saw "Connection reset by peer" and the explanation was
+        # discarded. Every check below would have lost its message that way.
+        data, fds = recv_with_fds(conn)
+        request = parse_exec(data)
+        if len(fds) != len(request["fds"]):
+            raise Refused("descriptor count does not match the fd table")
 
         name = flatpak_identity(procfd)
         if name != app_id:
@@ -759,11 +771,6 @@ def serve(conn, app_id, bwrap_path):
 
         mnt, joinable = namespace_fds(procfd)
         opened = [mnt] + list(joinable.values())
-
-        data, fds = recv_with_fds(conn)
-        request = parse_exec(data)
-        if len(fds) != len(request["fds"]):
-            raise Refused("descriptor count does not match the fd table")
 
         # Everything above was read through descriptors pinned to the caller.
         # This is the last chance to notice that the caller died while we were
@@ -836,7 +843,9 @@ def serve(conn, app_id, bwrap_path):
         except OSError:
             pass
     finally:
-        for fd in opened + [f for f in (pidfd, procfd) if f is not None]:
+        # fds still held here means the request was refused after they arrived;
+        # the success path empties the list once the child owns them.
+        for fd in fds + opened + [f for f in (pidfd, procfd) if f is not None]:
             try:
                 os.close(fd)
             except OSError:
