@@ -346,6 +346,17 @@ jobs:
           chown "$uid:$uid" /home/tester
           install -d -o "$uid" -g "$uid" -m 700 "/run/user/$uid"
           chmod -R a+rX .
+          # Whether an unprivileged uid can create a user namespace here is the
+          # thing the whole suite rests on, so establish it before the suite
+          # does and print both sides of the comparison. Root manages it -- the
+          # build above proves that -- so if the tester cannot, the difference
+          # is the interesting part.
+          echo "max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces)"
+          unshare --user --map-root-user true \
+            && echo "root: userns ok" || echo "root: userns FAILED"
+          python3 host/run-as-uid.py "$uid" \
+            unshare --user --map-root-user true \
+            && echo "tester: userns ok" || echo "tester: userns FAILED"
           # HOME is the tester's, so app data lands in their own ~/.var/app;
           # XDG_DATA_HOME still points at the installation built above.
           export HOME=/home/tester USER=tester

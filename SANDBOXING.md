@@ -7,6 +7,16 @@ session databases, stored on the host at
 host-installed `codex` CLI — the two keep separate configuration and
 history. Files reach the app through the file-chooser portal.
 
+`--talk-name=org.freedesktop.secrets` is not granted, so Electron's
+`safeStorage` cannot reach the login keyring and falls back to a key built into
+Chromium, with the token under `~/.var/app/com.openai.ChatGPT`. The reason is
+that the Secret Service specification does not require per-application
+isolation, and the usual implementations do not provide it — an app that can
+talk to the service can read every unlocked secret of every other application.
+The token is therefore about as protected as any file in your home directory,
+which is where it already lived, and nothing else on the system is exposed to
+this app. README.md has the override for anyone who prefers the keyring.
+
 ## Codex's own sandbox
 
 Codex isolates every command it runs with **bubblewrap**, which needs

@@ -64,8 +64,14 @@ if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
   note "XDG_RUNTIME_DIR was unset; using $XDG_RUNTIME_DIR"
 fi
 
-if ! unshare --user --map-root-user true 2>/dev/null; then
-  skip_all "this host cannot create user namespaces, so no broker can work"
+# Report the reason rather than swallowing it. "cannot create user namespaces"
+# with no errno behind it is not a diagnosis, and the difference between EPERM
+# and ENOSPC is the difference between a policy and a spent quota.
+if ! userns_err=$(unshare --user --map-root-user true 2>&1); then
+  note "max_user_namespaces: $(cat /proc/sys/user/max_user_namespaces 2>&1)"
+  note "unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo 'not present')"
+  note "uid=$(id -u) in $(readlink /proc/self/ns/user 2>&1)"
+  skip_all "cannot create a user namespace, so no broker can work: $userns_err"
 fi
 
 # The broker refuses to serve an app running as root, because bubblewrap then

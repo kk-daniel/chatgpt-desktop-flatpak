@@ -32,10 +32,16 @@ ensure_codex_dir() {
 # existing setting from an older install is harmless and is left alone.
 
 electron_args=()
-# Chromium picks its safeStorage backend from XDG_CURRENT_DESKTOP and falls
-# back to a hardcoded key on unrecognised desktops, which silently defeats
-# the --talk-name=org.freedesktop.secrets grant and loses the login.
-electron_args+=(--password-store=gnome-libsecret)
+# No --password-store here on purpose. The app has no route to the Secret
+# Service -- see the manifest for why that grant is not given -- and forcing
+# gnome-libsecret with nothing to talk to makes safeStorage fail rather than
+# fall back, which loses the login instead of degrading it. Left unset,
+# Chromium detects that no keyring is reachable and encrypts the token with a
+# built-in key under the app's own data directory.
+#
+# Anyone who would rather have the keyring can grant it back; README.md has the
+# two override commands, and ELECTRON_EXTRA_LAUNCH_ARGS is how the switch comes
+# back without editing this file.
 
 if [ -n "${WAYLAND_DISPLAY:-}" ] && [ "${ELECTRON_OZONE_PLATFORM_HINT:-wayland}" = "wayland" ]; then
   electron_args+=("--enable-features=UseOzonePlatform,WaylandWindowDecorations" --enable-wayland-ime --wayland-text-input-version=3)

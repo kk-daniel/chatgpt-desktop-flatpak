@@ -51,10 +51,25 @@ finish-args:
   # directory is granted; files reach the app through the file-chooser
   # portal instead.
   - --persist=.codex
-  # Electron safeStorage keeps the ChatGPT session token in the login
-  # keyring via libsecret. Without this the app cannot persist a login and
-  # re-prompts on every start.
-  - --talk-name=org.freedesktop.secrets
+  # Deliberately absent: --talk-name=org.freedesktop.secrets.
+  #
+  # Electron safeStorage would keep the session token in the login keyring
+  # through libsecret, and that grant is what makes it reachable. But the
+  # Secret Service specification does not require per-application isolation,
+  # and gnome-keyring and KWallet do not provide it: an app that can talk to
+  # the service can read every unlocked secret belonging to every other
+  # application. That is a large amount of access to hold in exchange for not
+  # re-entering one login.
+  #
+  # Without it Chromium's backend detection finds no usable keyring and falls
+  # back to encrypting the token with a built-in key inside the app's own data
+  # directory -- no worse, in practice, than a file in your home directory,
+  # since that is where it already was. --password-store is not forced in the
+  # launcher either, because forcing gnome-libsecret with no route to the
+  # service makes safeStorage fail instead of fall back.
+  #
+  # README.md documents the override for anyone who would rather have the
+  # keyring than the isolation. It is one command, and it is their call.
   - --talk-name=org.freedesktop.Notifications
   # Notification-area / tray (StatusNotifierItem on KDE & GNOME-via-extension,
   # AppIndicator on Ubuntu/Cinnamon). Without these the SNI registration

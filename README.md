@@ -112,6 +112,42 @@ session databases, stored on the host at
 host-installed `codex` CLI — the two keep separate configuration and
 history. Files reach the app through the file-chooser portal.
 
+### The login keyring
+
+The app is **not** given `--talk-name=org.freedesktop.secrets`. Electron's
+`safeStorage` would use it to keep the session token in the login keyring, but
+the Secret Service specification does not require per-application isolation and
+neither gnome-keyring nor KWallet provides it: an app that can talk to the
+service can read every unlocked secret belonging to every other application.
+That is a lot of access in exchange for not re-entering one login.
+
+Without it the token is encrypted with a key built into Chromium and stored
+under `~/.var/app/com.openai.ChatGPT`. Treat it as a file in your home
+directory, because that is what it is — anyone who can read that directory can
+recover the token. Nothing else on the system can.
+
+If you would rather have the keyring, grant it back:
+
+```sh
+flatpak override --user --talk-name=org.freedesktop.secrets com.openai.ChatGPT
+```
+
+On a desktop Chromium does not recognise, backend detection will still not find
+it, so name the backend too:
+
+```sh
+flatpak override --user --env=ELECTRON_EXTRA_LAUNCH_ARGS=--password-store=gnome-libsecret com.openai.ChatGPT
+```
+
+Use `--password-store=kwallet6` on KDE. To undo either:
+
+```sh
+flatpak override --user --no-talk-name=org.freedesktop.secrets --unset-env=ELECTRON_EXTRA_LAUNCH_ARGS com.openai.ChatGPT
+```
+
+An existing login does not survive the switch in either direction: the token was
+encrypted with whichever backend was in use, so expect to sign in once more.
+
 > [!IMPORTANT]
 > **Codex's sandbox needs a small service on the host, installed separately.**
 >
