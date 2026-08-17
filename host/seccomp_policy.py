@@ -25,9 +25,19 @@ against this comment, in both directions: refusing something flatpak allows
 makes a Codex command fail for no visible reason, and allowing something flatpak
 refuses widens the sandbox silently.
 
-Syscall numbers are x86_64. The architecture is checked first, so a process that
-tries the i386 or x32 entry points to reach a different numbering is killed
-rather than let through.
+Syscall numbers are x86_64, and that is a hard limit rather than an oversight
+waiting to be tidied. The filter kills anything arriving through another
+architecture's entry point, because on a foreign numbering these numbers mean
+different syscalls -- so on an aarch64 build every command would be killed by
+SIGSYS with nothing to explain it. install() therefore refuses to run at all on
+an architecture it has no table for, which turns that into a stated limitation.
+
+Adding aarch64 means a second table, and the numbers differ throughout: ptrace
+is 101 here and 117 there, socket 41 against 198, and modify_ldt does not exist
+at all. Writing one from memory is precisely the mistake this file is built to
+avoid, so it should be added only together with a run of
+test-seccomp-parity.sh on that architecture, which is what would catch a wrong
+entry in either direction.
 """
 
 import ctypes
@@ -217,8 +227,32 @@ def build_program():
     return b"".join(prog)
 
 
+# The machines this file has a syscall table for. Deliberately a lookup rather
+# than an assumption, so an unsupported build fails with a sentence instead of
+# SIGSYS on every command.
+SUPPORTED_MACHINES = {"x86_64": AUDIT_ARCH_X86_64}
+
+
+class UnsupportedArchitecture(Exception):
+    """The policy has no syscall table for this machine."""
+
+
+def check_architecture():
+    machine = os.uname().machine
+    if machine not in SUPPORTED_MACHINES:
+        raise UnsupportedArchitecture(
+            f"the sandbox broker has no seccomp policy for {machine}: the "
+            f"syscall numbers it enforces are x86_64's and mean different "
+            f"calls elsewhere. Commands would be killed by SIGSYS rather than "
+            f"sandboxed, so they are refused instead. Adding {machine} needs "
+            f"its own table, verified with host/test-seccomp-parity.sh on "
+            f"{machine}")
+    return machine
+
+
 def install():
     """Apply the filter to this process and everything it goes on to run."""
+    check_architecture()
     libc = ctypes.CDLL(None, use_errno=True)
     libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
                            ctypes.c_ulong, ctypes.c_ulong]

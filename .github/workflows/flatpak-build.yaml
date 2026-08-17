@@ -323,25 +323,33 @@ jobs:
           # through getpwuid.
           uid=1001
           # Read the installation out of the environment rather than assuming
-          # /root: a container job's HOME is not the account's home directory,
-          # so hardcoding it copied an empty directory and the tests then
-          # reported the app as not installed, three layers from the cause.
-          src="${XDG_DATA_HOME:-$HOME/.local/share}/flatpak"
-          echo "HOME=$HOME  installation=$src"
+          # /root: a container job's HOME is not the account's home directory.
+          data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+          echo "HOME=$HOME  installation=$data_home/flatpak"
           flatpak --user info "${APP_ID}//${BRANCH}" >/dev/null
           if ! grep -q '^tester:' /etc/passwd; then
             echo "tester:x:$uid:$uid::/home/tester:/bin/bash" >> /etc/passwd
             echo "tester:x:$uid:" >> /etc/group
           fi
-          mkdir -p /home/tester/.local/share
-          cp -al "$src" /home/tester/.local/share/flatpak
-          # Hardlinks share inodes, so this reassigns root's installation too.
-          # Harmless here: root ignores file permissions, and the later steps
-          # that use it run as root.
-          chown -R "$uid:$uid" /home/tester
+          # Shared rather than copied. Hardlinking it failed with
+          # "Invalid cross-device link" -- /github/home is its own filesystem --
+          # and a real copy would be the whole SDK. The tester reads the
+          # existing installation through XDG_DATA_HOME instead, which needs the
+          # path traversable and the tree owned by them so flatpak can lock it.
+          d="$data_home"
+          while [ "$d" != / ]; do
+            chmod a+rX "$d" 2>/dev/null || true
+            d=$(dirname "$d")
+          done
+          chown -R "$uid:$uid" "$data_home/flatpak"
+          mkdir -p /home/tester
+          chown "$uid:$uid" /home/tester
           install -d -o "$uid" -g "$uid" -m 700 "/run/user/$uid"
           chmod -R a+rX .
+          # HOME is the tester's, so app data lands in their own ~/.var/app;
+          # XDG_DATA_HOME still points at the installation built above.
           export HOME=/home/tester USER=tester
+          export XDG_DATA_HOME="$data_home"
           export XDG_RUNTIME_DIR="/run/user/$uid"
           python3 host/run-as-uid.py "$uid" bash host/test-broker-live.sh
 

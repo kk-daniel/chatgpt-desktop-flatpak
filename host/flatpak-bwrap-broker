@@ -66,7 +66,15 @@ import seccomp_policy  # noqa: E402 - needs the path above
 # encoding would corrupt arguments this broker is supposed to pass through
 # untouched.
 
-MAGIC = b"FBB\x01"
+# The version is its own byte after the tag, so a client and broker that
+# disagree can say so. They will disagree: the client ships inside the flatpak
+# and updates with it, while the broker is installed separately by
+# host/install.sh and a flatpak update does not touch it. Before this was
+# split out, skew presented as "bad magic: not a broker client", which points
+# at the wrong thing entirely.
+MAGIC_TAG = b"FBB"
+PROTOCOL_VERSION = 1
+MAGIC = MAGIC_TAG + bytes([PROTOCOL_VERSION])
 MSG_EXEC = 1
 MSG_SIGNAL = 2
 MSG_RESULT = 3
@@ -246,8 +254,18 @@ class Reader:
 
 def parse_exec(data):
     r = Reader(data)
-    if r.take(4) != MAGIC:
-        raise Refused("bad magic: not a broker client")
+    if r.take(3) != MAGIC_TAG:
+        raise Refused("not a broker client")
+    version = r.u8()
+    if version != PROTOCOL_VERSION:
+        # Fail closed and name both sides. The client lives in the flatpak and
+        # the broker was installed by hand, so this is the expected shape of a
+        # half-finished update rather than an exotic case.
+        raise Refused(
+            f"protocol mismatch: the client speaks version {version}, this "
+            f"broker speaks {PROTOCOL_VERSION}. Re-run host/install.sh from a "
+            f"checkout matching the installed flatpak -- a flatpak update does "
+            f"not update the broker")
     kind = r.u8()
     if kind != MSG_EXEC:
         raise Refused(f"expected an exec message, got type {kind}")
@@ -728,6 +746,13 @@ def serve(conn, app_id, bwrap_path):
         name = flatpak_identity(procfd)
         if name != app_id:
             raise Refused(f"caller is {name}, this broker serves {app_id}")
+
+        # Cheap, and checked per request rather than only at startup so the
+        # reason reaches the client instead of dying in the journal.
+        try:
+            seccomp_policy.check_architecture()
+        except seccomp_policy.UnsupportedArchitecture as e:
+            raise Refused(str(e))
 
         uid, gid = app_inside_ids(procfd)
         refuse_root_app(uid)

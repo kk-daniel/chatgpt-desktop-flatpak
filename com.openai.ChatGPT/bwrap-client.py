@@ -29,8 +29,13 @@ import time
 
 REAL_BWRAP = "/app/libexec/flatpak-bwrap-broker/bwrap"
 
-# Must match host/flatpak-bwrap-broker exactly.
-MAGIC = b"FBB\x01"
+# Must match host/flatpak-bwrap-broker exactly. The version is a separate byte
+# so a broker installed from a different checkout can say what it speaks instead
+# of rejecting the message as unrecognisable -- this client updates with the
+# flatpak, the broker does not.
+MAGIC_TAG = b"FBB"
+PROTOCOL_VERSION = 1
+MAGIC = MAGIC_TAG + bytes([PROTOCOL_VERSION])
 MSG_EXEC = 1
 MSG_SIGNAL = 2
 MSG_RESULT = 3

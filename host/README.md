@@ -18,7 +18,18 @@ systemctl --user status flatpak-bwrap-broker@com.openai.ChatGPT.socket
 journalctl --user -u flatpak-bwrap-broker@com.openai.ChatGPT.service -f
 ```
 
-Requires Linux 6.5 or newer for `SO_PEERPIDFD`, and systemd's user session.
+Requires Linux 6.5 or newer for `SO_PEERPIDFD`, systemd's user session, and
+**x86_64**. The seccomp policy enforces x86_64 syscall numbers, which mean
+different calls on another architecture, so the broker refuses to serve anything
+else rather than letting commands die of SIGSYS. The manifest does carry aarch64
+sources; on such a build the sandbox will not work until a second syscall table
+is added and checked with `host/test-seccomp-parity.sh` **on that architecture**.
+
+**Re-run `install.sh` after every change to the broker.** A flatpak update
+replaces the client inside the app but cannot touch a host service, so the two
+drift apart. They will not fail silently — the protocol carries a version and a
+mismatch is refused with a message naming both sides — but nothing updates the
+broker for you.
 
 ## Why it exists
 

@@ -152,6 +152,24 @@ def test_seccomp_program():
     check(run_filter(prog, 101) == eperm, "ptrace still blocked after the socket branch")
 
 
+def test_architecture_gate():
+    print("\n== architecture ==")
+    # An x86_64-only policy on another machine would kill every command with
+    # SIGSYS and no explanation, so it has to refuse instead.
+    print(f"      running on {os.uname().machine}")
+    check("x86_64" in seccomp_policy.SUPPORTED_MACHINES,
+          "x86_64 has a syscall table")
+    check("aarch64" not in seccomp_policy.SUPPORTED_MACHINES,
+          "aarch64 is not claimed without a table verified there")
+    try:
+        seccomp_policy.check_architecture()
+        check(os.uname().machine == "x86_64",
+              "the architecture check passes only where a table exists")
+    except seccomp_policy.UnsupportedArchitecture as e:
+        check("host/test-seccomp-parity.sh" in str(e),
+              f"an unsupported machine is refused with the way forward ({e})")
+
+
 def test_seccomp_install():
     print("\n== seccomp install (live) ==")
     inside_flatpak = os.path.exists("/.flatpak-info")
@@ -232,8 +250,20 @@ def test_protocol_roundtrip():
     check(produced[1] == "--ro-bind",
           "the first option survives: position 0 is the program name")
 
+    # Version skew has to be distinguishable from a foreign client, because it
+    # is the expected consequence of updating the flatpak without re-running
+    # host/install.sh.
+    skewed = bytearray(client.build_request(["bwrap", "--version"], [0, 1, 2]))
+    skewed[3] = 99
+    try:
+        broker.parse_exec(bytes(skewed))
+        check(False, "a protocol version mismatch is refused")
+    except broker.Refused as e:
+        check("protocol mismatch" in str(e) and "install.sh" in str(e),
+              f"a version mismatch says so and names the fix ({e})")
+
     for bad, why in (
-        (b"XXXX" + bytes([1]), "bad magic"),
+        (b"XXXX" + bytes([1]), "an unrecognised tag"),
         (broker.MAGIC + bytes([99]), "wrong message type"),
         (broker.MAGIC + bytes([1]) + b"\xff\xff\xff\xff", "absurd argv count"),
         (broker.MAGIC + bytes([1]) + struct.pack("<I", 1)
@@ -414,6 +444,7 @@ def test_fd_table_limits():
 
 def main():
     test_seccomp_program()
+    test_architecture_gate()
     test_seccomp_install()
     test_protocol_roundtrip()
     test_install_fds()
