@@ -317,20 +317,30 @@ jobs:
           REQUIRE_BROKER_LIVE: 1
         run: |
           set -eux
-          id -u tester >/dev/null 2>&1 || useradd -m tester
-          install -d -m 755 /home/tester/.local/share
+          echo "tools: $(command -v setpriv || echo 'no setpriv') $(command -v getent || echo 'no getent')"
+          # The image has no shadow-utils, so the account is written directly.
+          # It needs a passwd entry rather than just a uid because flatpak
+          # resolves the home directory through getpwuid.
+          uid=1001
+          if ! getent passwd tester >/dev/null 2>&1; then
+            echo "tester:x:$uid:$uid::/home/tester:/bin/bash" >> /etc/passwd
+            echo "tester:x:$uid:" >> /etc/group
+          fi
+          mkdir -p /home/tester/.local/share
           cp -al /root/.local/share/flatpak /home/tester/.local/share/flatpak
           # Hardlinks share inodes, so this reassigns root's installation too.
           # Harmless here: root ignores file permissions, and the later steps
           # that use it run as root.
-          chown -R tester:tester /home/tester
-          install -d -o tester -g tester -m 700 "/run/user/$(id -u tester)"
+          chown -R "$uid:$uid" /home/tester
+          install -d -o "$uid" -g "$uid" -m 700 "/run/user/$uid"
           chmod -R a+rX .
-          su tester -s /bin/bash -c "
-            cd '$PWD'
-            export XDG_RUNTIME_DIR='/run/user/$(id -u tester)'
-            export BRANCH='$BRANCH' REQUIRE_BROKER_LIVE=1
-            bash host/test-broker-live.sh"
+          # setpriv rather than su: no PAM, no session setup, and it is
+          # util-linux, which this image already has because flatpak needs it.
+          setpriv --reuid="$uid" --regid="$uid" --clear-groups \
+            env HOME=/home/tester USER=tester PATH="$PATH" \
+                XDG_RUNTIME_DIR="/run/user/$uid" \
+                BRANCH="$BRANCH" REQUIRE_BROKER_LIVE=1 \
+                bash host/test-broker-live.sh
 
       # The risky logic now runs on the user's machine at first launch, so
       # exercise it for real: download the current package and unpack it
