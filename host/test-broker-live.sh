@@ -21,9 +21,14 @@ set -u
 
 APP=${APP_ID:-com.openai.ChatGPT}
 HERE=$(cd -- "$(dirname -- "$0")" && pwd)
-ROOT=$(dirname "$HERE")
-BRANCH_ARGS=()
-[ -n "${BRANCH:-}" ] && BRANCH_ARGS=(--branch="$BRANCH")
+
+# APP is the application id -- it names the socket and the broker instance, and
+# must stay bare. REF is what flatpak is asked to act on, which may carry a
+# branch. The ref form rather than --branch=, because `flatpak info` has no
+# --branch option and rejects it, which is a confusing way to be told the app is
+# not installed.
+REF=$APP
+[ -n "${BRANCH:-}" ] && REF="$APP//$BRANCH"
 
 pass=0
 fail=0
@@ -46,7 +51,7 @@ skip_all() {
 
 command -v flatpak >/dev/null || skip_all "no flatpak"
 command -v python3 >/dev/null || skip_all "no python3 on the host"
-flatpak info "${BRANCH_ARGS[@]}" "$APP" >/dev/null 2>&1 ||
+flatpak info "$REF" >/dev/null 2>&1 ||
   skip_all "$APP is not installed"
 
 # Both sides must agree on the runtime directory: flatpak binds
@@ -66,7 +71,7 @@ fi
 SOCK=$XDG_RUNTIME_DIR/app/$APP/bwrap-broker.sock
 
 # Run bwrap inside the app. Everything below goes through this.
-in_app() { flatpak run "${BRANCH_ARGS[@]}" --command=bwrap "$APP" "$@" 2>&1; }
+in_app() { flatpak run --command=bwrap "$REF" "$@" 2>&1; }
 
 # --- the broker is not running yet: check that it fails properly ----------
 
@@ -95,7 +100,7 @@ else
 fi
 # Codex swallows a failing command's stderr, and with no broker there is no
 # journal on the other side either, so the reason has to survive somewhere.
-logged=$(flatpak run "${BRANCH_ARGS[@]}" --command=cat "$APP" \
+logged=$(flatpak run --command=cat "$REF" \
   /var/cache/chatgpt-flatpak/bwrap-error.log 2>/dev/null)
 if printf '%s' "$logged" | grep -q 'broker is not running'; then
   ok "the reason is also left in /var/cache/chatgpt-flatpak/bwrap-error.log"
@@ -129,7 +134,7 @@ ok "the broker is listening on $SOCK"
 
 # --- what the app sees of itself, to compare against ---------------------
 
-app_uid=$(flatpak run "${BRANCH_ARGS[@]}" --command=id "$APP" -u 2>/dev/null | tr -d '\r')
+app_uid=$(flatpak run --command=id "$REF" -u 2>/dev/null | tr -d '\r')
 [ -n "$app_uid" ] || app_uid=$(id -u)
 note "the app runs as uid $app_uid"
 
@@ -186,12 +191,16 @@ done
 
 echo
 echo "== --unshare-net =="
+# /proc/net, not /sys/class/net. sysfs comes in through the bind and reflects
+# the namespace it was mounted in, so it would still list eth0 with the
+# namespace correctly unshared -- a test that fails while the isolation works.
+# /proc/net is a symlink to /proc/self/net, which is per-netns of the reader.
 out=$(in_app --ro-bind / / --dev /dev --proc /proc --unshare-net --chdir / -- \
-  /bin/sh -c 'ls /sys/class/net 2>/dev/null | tr "\n" " "')
-if printf '%s' "$out" | grep -q 'lo' && ! printf '%s' "$out" | grep -qE 'eth|wlan|enp|wlp'; then
-  ok "only loopback is present under --unshare-net"
+  /bin/sh -c 'awk -F: "NR>2 {gsub(/ /, \"\", \$1); print \$1}" /proc/net/dev | sort | tr "\n" " "')
+if [ "$(printf '%s' "$out" | tr -d ' ')" = "lo" ]; then
+  ok "only loopback exists under --unshare-net"
 else
-  bad "--unshare-net left other interfaces visible" "$out"
+  bad "--unshare-net left other interfaces in /proc/net/dev" "$out"
 fi
 
 echo
@@ -200,7 +209,7 @@ tmp=$(mktemp -d)
 python3 -c "import struct,sys; sys.stdout.buffer.write(struct.pack('HBBI', 6, 0, 0, 0x7fff0000))" > "$tmp/allow.bpf"
 printf '%s\0' --ro-bind / / --chdir / > "$tmp/args"
 # Handed in on real descriptors, the way Codex's helper does it.
-out=$(flatpak run "${BRANCH_ARGS[@]}" --filesystem="$tmp:ro" --command=sh "$APP" -c "
+out=$(flatpak run --filesystem="$tmp:ro" --command=sh "$REF" -c "
   exec 8<'$tmp/allow.bpf'
   bwrap --ro-bind / / --seccomp 8 --chdir / -- /bin/sh -c 'echo seccomp-fd-ok'
   exec 7<'$tmp/args'
@@ -219,7 +228,7 @@ echo "== exit status and streams =="
 in_app --ro-bind / / --chdir / -- /bin/sh -c 'exit 42' >/dev/null 2>&1
 [ $? -eq 42 ] && ok "the command's exit status is returned" || bad "exit status was lost"
 
-out=$(printf 'from-stdin' | flatpak run "${BRANCH_ARGS[@]}" --command=bwrap "$APP" \
+out=$(printf 'from-stdin' | flatpak run --command=bwrap "$REF" \
   --ro-bind / / --chdir / -- /bin/cat 2>/dev/null)
 [ "$out" = "from-stdin" ] && ok "stdin reaches the command" || bad "stdin did not reach the command" "$out"
 
