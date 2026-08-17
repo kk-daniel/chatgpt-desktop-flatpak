@@ -9,28 +9,12 @@ log() {
   printf '%s\n' "$*" >> "$log_file"
 }
 
-# Filesystem helpers are re-executed with a deliberately minimal environment
-# that drops BWRAP_LOG. The installed /app/bin/bwrap.log symlink therefore
-# uses its target's existence as the logging switch. Keep the persistent log
-# only while the launcher-level opt-in is set.
-configure_bwrap_logging() {
-  local bwrap_log=/var/cache/chatgpt-flatpak/bwrap.log
-  if [ "${BWRAP_LOG:-}" = 1 ]; then
-    mkdir -p "${bwrap_log%/*}"
-    touch "$bwrap_log"
-  else
-    rm -f "$bwrap_log"
-  fi
-}
-
-# Let the installed integration test exercise the launcher's logging switch
-# without fetching the payload or starting Electron. This is deliberately an
-# argument rather than another environment variable: the behavior under test
-# is already controlled by BWRAP_LOG.
-if [ "${1:-}" = --test-bwrap-logging ]; then
-  configure_bwrap_logging
-  exit 0
-fi
+# Sandbox diagnostics live on the host now. Every bwrap call is handled by
+# flatpak-bwrap-broker, which logs to the journal:
+#
+#   journalctl --user -u flatpak-bwrap-broker@com.openai.ChatGPT.service -f
+#
+# so there is no in-sandbox log file to switch on, and no BWRAP_LOG.
 
 # The app mkdirs its state dir non-recursively, so a missing ~/.codex makes
 # the first session store fail with ENOENT.
@@ -41,45 +25,11 @@ ensure_codex_dir() {
   fi
 }
 
-# The bwrap shim cannot hand a sandboxed command the caller's /tmp: the
-# portal always gives the child a fresh private tmpfs. Left unset, Codex
-# keeps declaring a policy the sandbox does not implement. Only ever adds --
-# an existing setting of either key is left alone, including an explicit
-# false, and any failure here costs the setting, not the launch.
-ensure_codex_sandbox_config() {
-  local cfg="$HOME/.codex/config.toml"
-  local section='[sandbox_workspace_write]'
-  local tmp
-
-  grep -qs 'exclude_slash_tmp\|exclude_tmpdir_env_var' "$cfg" && return 0
-
-  if [ ! -f "$cfg" ]; then
-    printf '%s\nexclude_slash_tmp = true\nexclude_tmpdir_env_var = true\n' \
-      "$section" > "$cfg" 2>/dev/null && log "Created $cfg with sandbox tmp settings"
-    return 0
-  fi
-
-  if grep -qsF "$section" "$cfg"; then
-    tmp="$cfg.chatgpt-new"
-    awk -v sec="$section" '
-      { print }
-      index($0, sec) == 1 && !done {
-        print "exclude_slash_tmp = true"
-        print "exclude_tmpdir_env_var = true"
-        done = 1
-      }
-    ' "$cfg" > "$tmp" 2>/dev/null &&
-      mv "$tmp" "$cfg" 2>/dev/null &&
-      log "Added sandbox tmp settings under existing $section"
-    rm -f "$tmp" 2>/dev/null
-  else
-    # A table header at end of file is always valid TOML and cannot land
-    # inside another table's scope.
-    printf '\n%s\nexclude_slash_tmp = true\nexclude_tmpdir_env_var = true\n' \
-      "$section" >> "$cfg" 2>/dev/null && log "Appended $section to $cfg"
-  fi
-  return 0
-}
+# Codex used to need exclude_slash_tmp/exclude_tmpdir_env_var written into
+# config.toml, because the portal could never hand a sandboxed command the
+# caller's /tmp. The broker runs bubblewrap inside this sandbox's own mount
+# namespace, so /tmp is simply there and Codex's default policy works. An
+# existing setting from an older install is harmless and is left alone.
 
 electron_args=()
 # Chromium picks its safeStorage backend from XDG_CURRENT_DESKTOP and falls
@@ -96,8 +46,6 @@ if [ -n "${XRDP_SESSION:-}" ]; then
 fi
 
 ensure_codex_dir
-ensure_codex_sandbox_config
-configure_bwrap_logging
 
 # Populates /var/data/chatgpt, which /app/electron/{resources,assets}
 # symlink to.
@@ -121,7 +69,7 @@ done
 # /app/bin last, so it wins outright. Codex picks the first bwrap on PATH,
 # and a real one there -- from a tool extension, or a host install visible
 # through a --filesystem override, e.g. Homebrew's -- would be used instead
-# of our shim and then die on the blocked namespace syscalls.
+# of the broker client and then die on the blocked namespace syscalls.
 PATH="/app/bin:$PATH"
 export PATH
 log "PATH=$PATH"

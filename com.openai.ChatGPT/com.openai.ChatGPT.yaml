@@ -269,6 +269,33 @@ modules:
       - type: patch
         path: osslsigncode-ms-app-policies.patch
 
+  # The real bubblewrap, built against this runtime. Neither the runtime nor
+  # the ChatGPT payload ships one -- Codex falls back to a helper, not to a
+  # bundled binary, so there is nothing to reuse -- and the
+  # broker needs a binary it can exec *inside* this sandbox's mount namespace,
+  # so it has to come from /app.
+  #
+  # Installed to /app/libexec rather than /app/bin on purpose: /app/bin/bwrap
+  # is the client Codex must find on PATH, and this must not be reachable that
+  # way. It is inert here in any case -- run from inside the sandbox it fails
+  # exactly like Codex's own copy, because flatpak's seccomp filter denies the
+  # namespace syscalls. Only the broker, standing outside that filter, can use
+  # it.
+  - name: bubblewrap
+    buildsystem: meson
+    config-opts:
+      # bwrapdir puts it straight where it belongs; there is no /app/bin stage
+      # it could be picked up from by accident.
+      - -Dbwrapdir=/app/libexec/flatpak-bwrap-broker
+      - -Dman=disabled
+      - -Dtests=false
+      - -Dbash_completion=disabled
+      - -Dzsh_completion=disabled
+    sources:
+      - type: archive
+        url: https://github.com/containers/bubblewrap/releases/download/v0.11.0/bubblewrap-0.11.0.tar.xz
+        sha256: 988fd6b232dafa04b8b8198723efeaccdb3c6aa9c1c7936219d5791a8b7a8646
+
   # No extra-data source: OpenAI serves the package only from a mutable
   # "latest" URL, so any sha256 pinned here would go stale on their next
   # release and break every fresh install until re-pinned. chatgpt-fetch
@@ -282,16 +309,12 @@ modules:
     build-commands:
       - install -Dm755 chatgpt.sh /app/bin/chatgpt
       - install -Dm755 chatgpt-fetch.sh /app/bin/chatgpt-fetch
-      # Installed as `bwrap` so Codex finds it on PATH ahead of its
-      # bundled copy. Flatpak denies the namespace syscalls bubblewrap
-      # needs, so the shim re-expresses the request as
-      # `flatpak-spawn --sandbox`, which needs no extra permission.
-      - install -Dm755 bwrap-shim.sh /app/bin/bwrap
-      # The read-only /app link gives filesystem-helper launches a stable
-      # log path even though Codex removes HOME, XDG_CACHE_HOME and
-      # BWRAP_LOG from their environment. chatgpt.sh creates or removes the
-      # writable target to enable or disable logging.
-      - ln -s /var/cache/chatgpt-flatpak/bwrap.log /app/bin/bwrap.log
+      # Installed as `bwrap` so Codex finds it on PATH ahead of its own
+      # copy. Flatpak denies the namespace syscalls bubblewrap needs, so
+      # this hands the request to the host broker, which runs the real
+      # bubblewrap from /app/libexec inside this sandbox's own namespaces.
+      # Nothing is translated on the way; see host/ and SANDBOXING.md.
+      - install -Dm755 bwrap-client.py /app/bin/bwrap
       - install -Dm644 expected-version /app/share/chatgpt/expected-version
       - install -Dm644 microsoft-roots.pem /app/share/chatgpt/microsoft-roots.pem
       - install -Dm644 ${FLATPAK_ID}.metainfo.xml -t /app/share/metainfo
@@ -314,7 +337,7 @@ modules:
       - type: file
         path: chatgpt-fetch.sh
       - type: file
-        path: bwrap-shim.sh
+        path: bwrap-client.py
       - type: file
         path: expected-version
       - type: file
