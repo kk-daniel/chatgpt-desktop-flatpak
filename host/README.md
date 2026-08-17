@@ -18,6 +18,20 @@ systemctl --user status flatpak-bwrap-broker@com.openai.ChatGPT.socket
 journalctl --user -u flatpak-bwrap-broker@com.openai.ChatGPT.service -f
 ```
 
+On **Ubuntu 24.04 and derivatives** one more thing is needed. They ship an
+AppArmor restriction on unprivileged user namespaces which does not block the
+`unshare` — it strips the capabilities the new namespace would carry, so
+bubblewrap fails at `write failed /proc/self/uid_map: Operation not permitted`
+while anything running as root works fine. Either allow it outright:
+
+```sh
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+or give bubblewrap an AppArmor profile that is permitted to create one, which is
+narrower. Measured in CI, where the same restriction produced exactly that error
+for the test user and nothing for root.
+
 Requires Linux 6.5 or newer for `SO_PEERPIDFD`, systemd's user session, and
 **x86_64**. The seccomp policy enforces x86_64 syscall numbers, which mean
 different calls on another architecture, so the broker refuses to serve anything

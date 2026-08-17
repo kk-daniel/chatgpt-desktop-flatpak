@@ -94,15 +94,13 @@ SOCK=$XDG_RUNTIME_DIR/app/$APP/bwrap-broker.sock
 
 # Run bwrap inside the app. Everything below goes through this.
 #
-# --unshare-user on every call, because Codex passes it on every call and
-# without it the shape is ambiguous when the app runs as uid 0, which is what
-# CI does. Seeing euid 0, bubblewrap does not create a user namespace of its own
-# and expects to mount with root's authority -- but the broker has dropped every
-# capability by then, so CLONE_NEWNS is refused and the whole suite fails with
-# "Creating new namespace failed: Operation not permitted". At uid 1000
-# bubblewrap knows it is unprivileged and creates the namespace first, which is
-# why a desktop run does not show this. Asking for the namespace explicitly is
-# both what Codex does and unambiguous at either uid.
+# --unshare-user on every call, because Codex passes it on every call. It also
+# removes an ambiguity: seeing euid 0 bubblewrap does not create a user namespace
+# of its own and expects to mount with root's authority, which the broker has
+# already given up, and the whole suite then fails with "Creating new namespace
+# failed: Operation not permitted". The broker refuses a root app outright now,
+# so that case cannot arise here -- but asking for the namespace explicitly is
+# what Codex does, so it is what should be exercised.
 in_app() { flatpak run --command=bwrap "$REF" --unshare-user "$@" 2>&1; }
 
 # --- the broker is not running yet: check that it fails properly ----------
@@ -144,12 +142,16 @@ fi
 
 echo
 echo "== starting the broker =="
-python3 "$HERE/flatpak-bwrap-broker" --app-id="$APP" >"$HERE/.broker.log" 2>&1 &
+# Not beside the script: the checkout is not necessarily writable by whoever
+# runs this. In CI it is owned by root and the tests run as an ordinary user,
+# and the log silently went missing.
+BROKER_LOG=$(mktemp)
+python3 "$HERE/flatpak-bwrap-broker" --app-id="$APP" >"$BROKER_LOG" 2>&1 &
 BROKER=$!
 cleanup() {
   kill "$BROKER" 2>/dev/null
   wait "$BROKER" 2>/dev/null
-  rm -f "$HERE/.broker.log"
+  rm -f "$BROKER_LOG"
 }
 trap cleanup EXIT
 
@@ -159,7 +161,7 @@ for _ in $(seq 1 50); do
 done
 if [ ! -S "$SOCK" ]; then
   echo "FAIL  the broker did not create $SOCK"
-  cat "$HERE/.broker.log"
+  cat "$BROKER_LOG"
   exit 1
 fi
 ok "the broker is listening on $SOCK"
@@ -315,6 +317,6 @@ echo "$pass passed, $fail failed, $skipped skipped"
 if [ "$fail" -gt 0 ]; then
   echo
   echo "broker log:"
-  sed 's/^/  /' "$HERE/.broker.log"
+  sed 's/^/  /' "$BROKER_LOG"
   exit 1
 fi
