@@ -1,0 +1,983 @@
+#!/usr/bin/env python3
+"""Run bubblewrap on behalf of a confined flatpak, inside that flatpak's own
+namespaces.
+
+Flatpak refuses unprivileged user namespaces to every app it starts: unshare,
+setns, mount, pivot_root and clone(CLONE_NEWUSER) are in its unconditional
+seccomp blocklist, and --allow=devel does not lift them -- measured, the app's
+filter is byte-identical with and without devel. Codex isolates every command it
+runs with bubblewrap, so left alone every sandboxed command fails.
+
+This broker runs on the host, outside that filter, and does the one thing the
+app cannot. It does *not* build a sandbox of its own design: it steps into the
+flatpak's real mount namespace and runs the app's own bubblewrap there, with the
+arguments Codex wrote, unmodified. The filesystem the command sees is therefore
+flatpak's, not a reconstruction of it, and no argument translation is involved.
+
+How stepping in is possible without root: flatpak runs bwrap with
+--disable-userns, which makes bwrap create user namespace A, set up the mounts
+there, then nest the app in a second namespace B. cap_capable() gives the owner
+of a user namespace, seen from that namespace's parent, every capability in it,
+and A was created by this uid from the initial namespace. So the broker holds
+CAP_SYS_ADMIN in A, may setns() into it, and from there may join the mount
+namespace A owns. Joining B instead is useless: capabilities do not flow from a
+child namespace up to its parent, which is why the mount namespace refuses.
+
+Two things about the result are worth being exact about, because they are the
+cost of the design and not incidental:
+
+  * Commands do not run under flatpak's own seccomp filter, because that filter
+    is exactly what stops bubblewrap. Most of it is reinstated here instead --
+    see seccomp_policy.py -- so what is actually given up is the namespace
+    group: clone, unshare, setns, mount, umount2, pivot_root, chroot, clone3.
+    Nothing else in flatpak's policy is relaxed, and the filesystem view is
+    identical to the app's because it *is* the app's.
+  * max_user_namespaces is raised inside A and left raised. --disable-userns
+    works by exhausting it, and the inner bwrap needs two. This costs the app
+    nothing: its own unshare() and clone(CLONE_NEWUSER) are refused by the
+    seccomp filter regardless of any limit.
+
+Any code inside the app can reach this socket, so the app's effective syscall
+surface becomes its own plus the namespace group. That is the honest statement
+of what installing this broker changes.
+
+The caller is authorised from kernel-supplied credentials only. Nothing the
+client sends is trusted for that decision.
+"""
+
+import argparse
+import ctypes
+import errno
+import fcntl
+import os
+import signal
+import socket
+import struct
+import sys
+import syslog
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import seccomp_policy  # noqa: E402 - needs the path above
+
+# --- protocol ------------------------------------------------------------
+# Must match com.openai.ChatGPT/bwrap-client.py exactly. Binary rather than
+# JSON because argv, environment and paths are byte strings: nothing in
+# execve() promises UTF-8, and a client that had to round-trip through a text
+# encoding would corrupt arguments this broker is supposed to pass through
+# untouched.
+
+# The version is its own byte after the tag, so a client and broker that
+# disagree can say so. They will disagree: the client ships inside the flatpak
+# and updates with it, while the broker is installed separately by
+# host/install.sh and a flatpak update does not touch it. Before this was
+# split out, skew presented as "bad magic: not a broker client", which points
+# at the wrong thing entirely.
+MAGIC_TAG = b"FBB"
+PROTOCOL_VERSION = 1
+MAGIC = MAGIC_TAG + bytes([PROTOCOL_VERSION])
+MSG_EXEC = 1
+MSG_SIGNAL = 2
+MSG_RESULT = 3
+
+RESULT_EXITED = 0
+RESULT_SIGNALLED = 1
+RESULT_ERROR = 2
+
+# Exit code the sandbox-setup child uses for its own failures. A command may
+# also exit 125, so it is only read as a setup failure when the child left a
+# reason on its pipe.
+SETUP_FAILED = 125
+
+# Refusing early is cheaper than being wedged by a client that lies about its
+# own sizes, and every one of these is far above what bwrap is ever handed.
+MAX_MESSAGE = 4 << 20
+MAX_ITEMS = 8192
+MAX_FDS = 64
+SOCKET_BUFFER = 8 << 20
+
+# Descriptor numbers the client may ask for. They are numbers of descriptors
+# genuinely open in the caller, so they are bounded by its own RLIMIT_NOFILE;
+# anything far above that is not a real request. Bounding them keeps the
+# reason pipe placeable out of reach, and turns a wild number into a stated
+# refusal rather than an OverflowError from fcntl.
+MAX_FD_NUMBER = 4096
+REASON_FD = MAX_FD_NUMBER + 8
+
+# --- syscalls ------------------------------------------------------------
+
+CLONE_NEWNS = 0x00020000
+CLONE_NEWUTS = 0x04000000
+CLONE_NEWIPC = 0x08000000
+CLONE_NEWUSER = 0x10000000
+CLONE_NEWPID = 0x20000000
+CLONE_NEWNET = 0x40000000
+
+NS_GET_USERNS = 0xB701
+NS_GET_PARENT = 0xB702
+NS_GET_OWNER_UID = 0xB704
+
+SO_PEERPIDFD = 77
+
+SYS_setns = 308
+SYS_pidfd_open = 434
+SYS_pidfd_send_signal = 424
+SYS_unshare = 272
+SYS_capset = 126
+
+PR_CAPBSET_DROP = 24
+PR_SET_NO_NEW_PRIVS = 38
+CAP_LAST_CAP = 40
+_LINUX_CAPABILITY_VERSION_3 = 0x20080522
+
+USERNS_HEADROOM = 1024
+LIMIT_PATH = "/proc/sys/user/max_user_namespaces"
+
+libc = ctypes.CDLL(None, use_errno=True)
+
+
+def _syscall(nr, *args):
+    rc = libc.syscall(ctypes.c_long(nr), *[ctypes.c_long(a) for a in args])
+    if rc < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    return rc
+
+
+def setns(fd, nstype):
+    return _syscall(SYS_setns, fd, nstype)
+
+
+def unshare(flags):
+    return _syscall(SYS_unshare, flags)
+
+
+def pidfd_open(pid):
+    return _syscall(SYS_pidfd_open, pid, 0)
+
+
+def pidfd_alive(pidfd):
+    try:
+        _syscall(SYS_pidfd_send_signal, pidfd, 0, 0, 0)
+        return True
+    except OSError:
+        return False
+
+
+def ns_ioctl(fd, request):
+    rc = libc.ioctl(fd, ctypes.c_ulong(request))
+    if rc < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    return rc
+
+
+def ns_owner_uid(fd):
+    uid = ctypes.c_uint()
+    if libc.ioctl(fd, ctypes.c_ulong(NS_GET_OWNER_UID), ctypes.byref(uid)) < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+    return uid.value
+
+
+def drop_all_capabilities():
+    """Leave the sandbox setup with nothing the command could use.
+
+    We reach the app's namespaces as uid 0 with a full capability set, and
+    bubblewrap hands its child whatever it was given: measured, that is
+    CapEff 000001ffffffffff, which is a great deal more than Codex asked for.
+    The uid is mapped back down separately; this removes the capabilities.
+    """
+    for cap in range(CAP_LAST_CAP + 1):
+        libc.prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)
+
+    header = struct.pack("Ii", _LINUX_CAPABILITY_VERSION_3, 0)
+    data = struct.pack("6I", 0, 0, 0, 0, 0, 0)
+    hdr = ctypes.create_string_buffer(header, len(header))
+    dat = ctypes.create_string_buffer(data, len(data))
+    if libc.syscall(ctypes.c_long(SYS_capset), hdr, dat) < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+    libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+
+
+# --- logging -------------------------------------------------------------
+# argv, environment and paths are the contents of the user's prompts and files.
+# They are never logged; only shapes and outcomes are. BROKER_DEBUG=1 relaxes
+# that for a session that needs explaining, and says so when it does.
+
+DEBUG = os.environ.get("BROKER_DEBUG") == "1"
+
+
+def log(message, *, detail=None):
+    if detail is not None and DEBUG:
+        message = f"{message} [{detail}]"
+    syslog.syslog(syslog.LOG_INFO, message)
+    if sys.stderr.isatty() or not sys.stdin.isatty():
+        print(message, file=sys.stderr, flush=True)
+
+
+class Refused(Exception):
+    """The request will not be run, and the reason is safe to hand back."""
+
+
+# --- message framing -----------------------------------------------------
+
+
+class Reader:
+    def __init__(self, data):
+        self.data = data
+        self.pos = 0
+
+    def take(self, n):
+        if n < 0 or self.pos + n > len(self.data):
+            raise Refused("truncated message")
+        chunk = self.data[self.pos:self.pos + n]
+        self.pos += n
+        return chunk
+
+    def u32(self):
+        return struct.unpack("<I", self.take(4))[0]
+
+    def u8(self):
+        return self.take(1)[0]
+
+    def blob(self):
+        return self.take(self.u32())
+
+    def blob_list(self):
+        count = self.u32()
+        if count > MAX_ITEMS:
+            raise Refused(f"too many items ({count})")
+        return [self.blob() for _ in range(count)]
+
+
+def parse_exec(data):
+    r = Reader(data)
+    if r.take(3) != MAGIC_TAG:
+        raise Refused("not a broker client")
+    version = r.u8()
+    if version != PROTOCOL_VERSION:
+        # Fail closed and name both sides. The client lives in the flatpak and
+        # the broker was installed by hand, so this is the expected shape of a
+        # half-finished update rather than an exotic case.
+        raise Refused(
+            f"protocol mismatch: the client speaks version {version}, this "
+            f"broker speaks {PROTOCOL_VERSION}. Re-run host/install.sh from a "
+            f"checkout matching the installed flatpak -- a flatpak update does "
+            f"not update the broker")
+    kind = r.u8()
+    if kind != MSG_EXEC:
+        raise Refused(f"expected an exec message, got type {kind}")
+
+    request = {
+        "argv": r.blob_list(),
+        "env": r.blob_list(),
+        "cwd": r.blob(),
+        "fds": [r.u32() for _ in range(min(r.u32(), MAX_FDS + 1))],
+    }
+    if not request["argv"]:
+        raise Refused("empty argv")
+    if len(request["fds"]) > MAX_FDS:
+        raise Refused("too many file descriptors")
+    for number in request["fds"]:
+        if number > MAX_FD_NUMBER:
+            raise Refused(f"descriptor number {number} is above the "
+                          f"{MAX_FD_NUMBER} limit")
+    if len(set(request["fds"])) != len(request["fds"]):
+        raise Refused("the same descriptor number appears twice")
+    return request
+
+
+def result_message(kind, value, text=b""):
+    return (MAGIC + bytes([MSG_RESULT]) + bytes([kind])
+            + struct.pack("<I", value) + struct.pack("<I", len(text)) + text)
+
+
+# --- caller identification ----------------------------------------------
+
+
+def peer_pidfd(conn):
+    """Identify the caller by pidfd, not by pid.
+
+    SO_PEERCRED's pid is a number that can be reused between the moment it is
+    read and the moment the namespaces are opened. SO_PEERPIDFD pins the
+    process itself, so a stale identity becomes a dead pidfd rather than a
+    different process wearing the same number.
+    """
+    try:
+        raw = conn.getsockopt(socket.SOL_SOCKET, SO_PEERPIDFD, 4)
+    except OSError as e:
+        raise Refused(f"SO_PEERPIDFD unavailable ({e}); kernel 6.5+ required")
+    pidfd = struct.unpack("<i", raw)[0]
+
+    pid = None
+    with open(f"/proc/self/fdinfo/{pidfd}") as f:
+        for line in f:
+            if line.startswith("Pid:"):
+                pid = int(line.split()[1])
+    if pid is None or pid <= 0:
+        os.close(pidfd)
+        raise Refused("caller already gone")
+
+    creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                            struct.calcsize("3i"))
+    _, uid, _ = struct.unpack("3i", creds)
+    if uid != os.getuid():
+        os.close(pidfd)
+        raise Refused(f"caller uid {uid} is not {os.getuid()}")
+
+    return pidfd, pid
+
+
+def flatpak_identity(procfd):
+    """Read the caller's own .flatpak-info through its /proc directory.
+
+    Everything is opened relative to a single /proc/<pid> descriptor. If the
+    process exits, that descriptor goes stale and openat() fails, where a path
+    rebuilt from the pid each time could silently start naming a new process.
+    """
+    try:
+        fd = os.open("root/.flatpak-info", os.O_RDONLY, dir_fd=procfd)
+    except OSError as e:
+        raise Refused(f"caller has no .flatpak-info ({e}): not a flatpak")
+    try:
+        with os.fdopen(fd, "rb") as f:
+            text = f.read(64 << 10).decode("utf-8", "replace")
+    except OSError as e:
+        raise Refused(f"cannot read .flatpak-info ({e})")
+
+    name = None
+    section = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+        elif section == "Application" and line.startswith("name="):
+            name = line[5:]
+    if not name:
+        raise Refused("no application name in .flatpak-info")
+    return name
+
+
+def app_inside_ids(procfd):
+    """The uid and gid the app sees itself as, from its namespace's maps.
+
+    Read from outside, /proc/<pid>/uid_map lines are "inside outside count" in
+    our own numbering, so the app's own uid is whatever our uid maps to. The
+    command has to run as that, or file ownership inside the sandbox stops
+    matching what the app believes.
+    """
+    def lookup(name, outer):
+        try:
+            fd = os.open(name, os.O_RDONLY, dir_fd=procfd)
+            with os.fdopen(fd) as f:
+                for line in f:
+                    inside, outside, count = (int(x) for x in line.split())
+                    if outside <= outer < outside + count:
+                        return inside + (outer - outside)
+        except (OSError, ValueError):
+            pass
+        return outer
+
+    return lookup("uid_map", os.getuid()), lookup("gid_map", os.getgid())
+
+
+def same_namespace(fd, name):
+    """Is the broker already in this namespace?"""
+    try:
+        mine = os.stat(f"/proc/self/ns/{name}")
+    except OSError:
+        return False
+    theirs = os.fstat(fd)
+    return (mine.st_dev, mine.st_ino) == (theirs.st_dev, theirs.st_ino)
+
+
+def refuse_root_app(uid):
+    """An app running as root cannot be served safely, so it is not served.
+
+    Every step of that configuration fights the design, and the last one is not
+    a matter of effort. Seeing euid 0, bubblewrap takes its privileged path: it
+    wants CAP_SYS_ADMIN to unshare its mount namespace and CAP_SETUID to write
+    its id maps, so with capabilities dropped it cannot build a sandbox at all.
+    Keeping them gets bubblewrap working -- and then it does not drop them for
+    the command either, measured as CapEff 000001ffffffffff on the command
+    itself. A command holding CAP_SYS_ADMIN can unshare its own mount namespace
+    and remount away the read-only root Codex asked for. That is a worse outcome
+    than refusing, and the alternative -- adding --cap-drop to the command line
+    -- would mean editing Codex's arguments, which is the one thing this design
+    does not do.
+
+    Flatpak applications are not meant to run as root, so this costs nothing
+    real. It is stated rather than left to fail confusingly three layers down.
+    """
+    if uid == 0:
+        raise Refused(
+            "the app runs as uid 0, which this broker will not serve: "
+            "bubblewrap treats root as privileged and would hand the command "
+            "its capabilities, defeating the sandbox Codex asked for. Run the "
+            "flatpak as an ordinary user")
+
+
+def namespace_fds(procfd):
+    """Open every namespace descriptor before moving into any of them.
+
+    Order matters and it is not obvious: once the mount namespace is joined,
+    /proc is the app's own procfs, which belongs to the app's pid namespace,
+    and the host pid we are working from does not exist there. Opening the pid
+    namespace afterwards fails with ENOENT.
+
+    Not only the mount namespace. The command has to land in the caller's
+    network namespace in particular: an app without --share=network gets its
+    own, and a child left in the broker's would have host network -- a plain
+    escape, and the sort that would never show up on an app that shares it
+    anyway, as this one does.
+    """
+    # Only the ones we are not already in. --share=network and --share=ipc
+    # leave the app in the *host's* namespaces, which the initial user
+    # namespace owns -- and once we have entered A we are a descendant of that
+    # and hold no capabilities there, so setns() would be refused. Joining a
+    # namespace we already share is a no-op with a capability check attached,
+    # so the correct move is to skip it rather than to ask.
+    joinable = {}
+    for name in ("pid", "net", "ipc", "uts"):
+        try:
+            fd = os.open(f"ns/{name}", os.O_RDONLY, dir_fd=procfd)
+        except OSError as e:
+            raise Refused(f"cannot open the caller's {name} namespace ({e})")
+        if same_namespace(fd, name):
+            os.close(fd)
+        else:
+            joinable[name] = fd
+
+    try:
+        mnt = os.open("ns/mnt", os.O_RDONLY, dir_fd=procfd)
+    except OSError as e:
+        raise Refused(f"cannot open the caller's mount namespace ({e})")
+
+    try:
+        owner = ns_ioctl(mnt, NS_GET_USERNS)
+    except OSError as e:
+        raise Refused(f"cannot find the userns owning the mount ns ({e})")
+
+    # The whole approach rests on this: we hold capabilities in that namespace
+    # only because we own it from its parent. If we do not own it, we are not
+    # entitled to step in, and setns would fail anyway.
+    if ns_owner_uid(owner) != os.getuid():
+        raise Refused("the caller's mount namespace is owned by another user")
+
+    reject_nested(owner)
+
+    # The user namespace to enter is the one that *owns the mount namespace*,
+    # not the one the caller runs in. Flatpak nests the app one level deeper
+    # with --disable-userns, and capabilities do not flow from a child
+    # namespace up to its parent, so joining the caller's own would be refused
+    # by mntns_install().
+    joinable["user"] = owner
+    return mnt, joinable
+
+
+def reject_nested(owner):
+    """Serve the app itself, never a command already inside a sandbox.
+
+    A command that the broker has already sandboxed can see this socket and,
+    unless its own policy happens to block connect(), could ask for another
+    sandbox. Its filesystem view would be correctly nested -- the broker always
+    joins the *caller's* namespaces -- but its seccomp filter would not be,
+    because the new process is forked from the broker and seccomp filters are
+    inherited only from a parent. A command confined by Codex would get out
+    from under that confinement, which is precisely what it must not do.
+
+    The check is structural rather than heuristic. The user namespace owning
+    the app's mount namespace is created by flatpak's bwrap directly from this
+    one, so its parent is ours. Every namespace created inside the sandbox is
+    at least one level deeper, and fails this.
+    """
+    try:
+        parent = ns_ioctl(owner, NS_GET_PARENT)
+    except OSError as e:
+        raise Refused(f"cannot inspect the caller's namespace chain ({e})")
+
+    mine = os.open("/proc/self/ns/user", os.O_RDONLY)
+    try:
+        nested = os.fstat(parent).st_ino != os.fstat(mine).st_ino
+    finally:
+        os.close(parent)
+        os.close(mine)
+
+    if nested:
+        raise Refused(
+            "caller is already inside a sandbox. Nesting is refused: the "
+            "broker cannot inherit the seccomp filter the caller is under, so "
+            "a nested sandbox would be less confined than the command asking "
+            "for it, not more")
+
+
+# --- sandbox entry -------------------------------------------------------
+
+
+def raise_userns_limit():
+    """--disable-userns spends the quota; the inner bwrap needs two of them.
+
+    Not restored afterwards. Restoring it would break every command running
+    concurrently, and it protects nothing: the app's own attempts to create a
+    namespace are refused by the seccomp filter whatever this says.
+    """
+    try:
+        with open(LIMIT_PATH) as f:
+            current = int(f.read().strip())
+    except (OSError, ValueError):
+        return
+    if current >= USERNS_HEADROOM:
+        return
+    try:
+        with open(LIMIT_PATH, "w") as f:
+            f.write(str(USERNS_HEADROOM))
+    except OSError as e:
+        log(f"warning: could not raise max_user_namespaces: {e}")
+
+
+def become_unprivileged(uid, gid):
+    """Move into a nested user namespace C and give up what is safe to lose.
+
+    We arrive in A -- the namespace that owns the app's mounts -- as uid 0 with
+    a full capability set. Measured, bubblewrap run from there hands its child
+    the same thing: CapEff 000001ffffffffff, which is a great deal more than
+    Codex asked for, and capabilities in A are real because A owns the mounts.
+
+    So the first thing is to get out of A into a child namespace C, mapping
+    that 0 back to the app's own uid. Doing it here rather than by adding
+    --uid to the command line is what lets Codex's arguments reach bubblewrap
+    exactly as written.
+
+    C is what confines the command; the capability drop is defence in depth on
+    top of it, since capabilities held in C are not capabilities in A or on the
+    host. But it is not optional either, in both directions: at a non-zero uid
+    bubblewrap refuses to start with capabilities it did not expect, and at uid
+    0 -- see refuse_root_app() -- keeping them was measured to leave the command
+    itself holding CAP_SYS_ADMIN, which is why that configuration is refused
+    rather than accommodated.
+    """
+    outer = os.getuid()
+    outer_gid = os.getgid()
+    unshare(CLONE_NEWUSER)
+
+    with open("/proc/self/uid_map", "w") as f:
+        f.write(f"{uid} {outer} 1\n")
+    try:
+        with open("/proc/self/setgroups", "w") as f:
+            f.write("deny")
+    except OSError:
+        pass
+    with open("/proc/self/gid_map", "w") as f:
+        f.write(f"{gid} {outer_gid} 1\n")
+
+    drop_all_capabilities()
+
+
+def install_fds(received, wanted, preserve=None):
+    """Put each descriptor back on the number the client's argv refers to.
+
+    bwrap's fd-taking flags -- --seccomp, --args, --bind-fd and the rest -- name
+    descriptors by number, so the numbers have to be restored before exec.
+
+    Everything is parked above the highest target first. Moving them one at a
+    time would let a request that maps 4->3 and 3->4 clobber one with the
+    other, and even a plain dup() could land on a number still to be written.
+
+    The invariant afterwards is that the command holds exactly the descriptors
+    the client sent, plus stdio, and nothing else. In particular the command's
+    stdin, stdout and stderr are either what the client sent or /dev/null, and
+    never something inherited from the broker: this used to skip fds 0-2 in the
+    closing sweep, which the real client hid by always sending all three, but a
+    request that omitted one left the broker's own stdio in place -- under
+    systemd, its journald socket.
+    """
+    base = max(wanted) + 10 if wanted else 10
+    parked = [fcntl.fcntl(fd, fcntl.F_DUPFD, base) for fd in received]
+    for fd in received:
+        os.close(fd)
+
+    for temp, target in zip(parked, wanted):
+        os.dup2(temp, target, inheritable=True)
+        os.close(temp)
+
+    # Bound to /dev/null rather than left closed. A process exec'd with 0, 1 or
+    # 2 closed is its own hazard: the next open() lands on the free number and a
+    # write meant for stdout goes into a file.
+    for fd in (0, 1, 2):
+        if fd in wanted:
+            continue
+        spare = os.open(os.devnull, os.O_RDWR)
+        if spare != fd:
+            os.dup2(spare, fd, inheritable=True)
+            os.close(spare)
+        else:
+            os.set_inheritable(fd, True)
+
+    keep = set(wanted) | {0, 1, 2}
+    if preserve is not None:
+        keep.add(preserve)
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            fd = int(name)
+        except ValueError:
+            continue
+        if fd not in keep:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def exec_argv(argv, bwrap_path):
+    """The command line to hand bubblewrap.
+
+    The wire format carries a full argv, position 0 included, the way execve()
+    does -- so the client sends the name it was invoked under, and the broker
+    substitutes the real bubblewrap path, which the client cannot influence.
+    Everything after position 0 is Codex's, untouched.
+
+    Getting this off by one is silent and confusing: dropping an option instead
+    of the program name leaves bwrap reading the option's value as the command,
+    which surfaces as `execvp /: Permission denied`. test-broker.py pins the
+    convention on both sides for that reason.
+    """
+    return [bwrap_path] + [a.decode("utf-8", "surrogateescape")
+                           for a in argv[1:]]
+
+
+def run_request(request, fds, mnt, joinable, uid, gid, bwrap_path, reason_fd):
+    """Join the app's namespaces and exec its bubblewrap. Never returns."""
+    # The user namespace first: entering it is what grants the CAP_SYS_ADMIN
+    # every other one of these needs. The mount namespace last, because after
+    # it /proc belongs to the app and the descriptors opened from the host's
+    # /proc would no longer be openable.
+    setns(joinable["user"], CLONE_NEWUSER)
+    for name, flag in (("pid", CLONE_NEWPID), ("net", CLONE_NEWNET),
+                       ("ipc", CLONE_NEWIPC), ("uts", CLONE_NEWUTS)):
+        if name not in joinable:
+            continue
+        try:
+            setns(joinable[name], flag)
+        except OSError as e:
+            # Not recoverable by carrying on: leaving the command in the
+            # broker's namespace instead of the app's is exactly the escape
+            # this is here to prevent.
+            raise OSError(e.errno,
+                          f"cannot join the caller's {name} namespace: {e}")
+    setns(mnt, CLONE_NEWNS)
+
+    raise_userns_limit()
+
+    # Joining a pid namespace only takes effect for children.
+    child = os.fork()
+    if child:
+        # This process is the only thing between the broker and the command,
+        # and it is in the app's pid namespace where the broker cannot reach.
+        # Relay rather than absorb: without this, a SIGINT would kill the
+        # relay and orphan the command it was waiting for.
+        def relay(signo, _frame, target=child):
+            try:
+                os.kill(target, signo)
+            except OSError:
+                pass
+
+        for signo in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP,
+                      signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2):
+            signal.signal(signo, relay)
+
+        while True:
+            try:
+                _, status = os.waitpid(child, 0)
+                break
+            except InterruptedError:
+                continue
+
+        if os.WIFSIGNALED(status):
+            # Die the same way, so the broker's own waitpid reports a signal
+            # and the client can reproduce it rather than see exit code 128+n.
+            signo = os.WTERMSIG(status)
+            signal.signal(signo, signal.SIG_DFL)
+            os.kill(os.getpid(), signo)
+        os._exit(os.WEXITSTATUS(status))
+
+    become_unprivileged(uid, gid)
+
+    argv = exec_argv(request["argv"], bwrap_path)
+    env = {}
+    for item in request["env"]:
+        key, _, value = item.partition(b"=")
+        env[key.decode("utf-8", "surrogateescape")] = value.decode(
+            "utf-8", "surrogateescape")
+
+    cwd = request["cwd"].decode("utf-8", "surrogateescape") or "/"
+    try:
+        os.chdir(cwd)
+    except OSError:
+        os.chdir("/")
+
+    # Moved above every number the client is allowed to ask for, so a target
+    # can no longer land on this pipe and take the explanation with it.
+    reason_fd = fcntl.fcntl(reason_fd, fcntl.F_DUPFD, REASON_FD)
+
+    # Kept open across the descriptor shuffle so an exec failure can still be
+    # explained, and closed by the kernel at exec so the command never sees it.
+    install_fds(fds, request["fds"], preserve=reason_fd)
+    os.set_inheritable(reason_fd, False)
+
+    # Last thing before exec, so nothing above has to run under it and
+    # everything after inherits it: bubblewrap, Codex's helper, the command.
+    seccomp_policy.install()
+
+    os.execve(bwrap_path, argv, env)
+
+
+# --- connection handling -------------------------------------------------
+
+
+def serve(conn, app_id, bwrap_path):
+    pidfd = procfd = None
+    opened = []
+    fds = []
+    try:
+        pidfd, pid = peer_pidfd(conn)
+        procfd = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY)
+
+        # The request is read before anything is decided about the caller, and
+        # the order is not cosmetic. A refusal raised while the request datagram
+        # still sat unread in the receive queue meant closing the socket with
+        # data queued on it, and the kernel answers that with a reset: the
+        # client saw "Connection reset by peer" and the explanation was
+        # discarded. Every check below would have lost its message that way.
+        data, fds = recv_with_fds(conn)
+        request = parse_exec(data)
+        if len(fds) != len(request["fds"]):
+            raise Refused("descriptor count does not match the fd table")
+
+        name = flatpak_identity(procfd)
+        if name != app_id:
+            raise Refused(f"caller is {name}, this broker serves {app_id}")
+
+        # Cheap, and checked per request rather than only at startup so the
+        # reason reaches the client instead of dying in the journal.
+        try:
+            seccomp_policy.check_architecture()
+        except seccomp_policy.UnsupportedArchitecture as e:
+            raise Refused(str(e))
+
+        uid, gid = app_inside_ids(procfd)
+        refuse_root_app(uid)
+
+        mnt, joinable = namespace_fds(procfd)
+        opened = [mnt] + list(joinable.values())
+
+        # Everything above was read through descriptors pinned to the caller.
+        # This is the last chance to notice that the caller died while we were
+        # doing it, which would leave us about to enter a namespace on behalf
+        # of nobody.
+        if not pidfd_alive(pidfd):
+            raise Refused("caller exited during setup")
+
+        log(f"exec for {name} pid {pid}: {len(request['argv'])} args, "
+            f"{len(fds)} fds",
+            detail=b" ".join(request["argv"]).decode("utf-8", "replace"))
+
+        # Everything from here on happens in a child that has no connection to
+        # the client, and a setup failure there used to surface as an empty
+        # exit code 125 with the reason in the journal -- which is how joining
+        # the wrong network namespace looked like nothing at all. This pipe
+        # carries the reason back so the client can print it.
+        reason_r, reason_w = os.pipe()
+        os.set_inheritable(reason_w, True)
+
+        child = os.fork()
+        if child == 0:
+            try:
+                conn.close()
+                os.close(reason_r)
+                os.close(pidfd)
+                os.close(procfd)
+                run_request(request, fds, mnt, joinable, uid, gid, bwrap_path,
+                            reason_w)
+            except BaseException as e:  # noqa: BLE001 - must not unwind
+                try:
+                    os.write(reason_w, str(e).encode("utf-8", "replace")[:800])
+                except OSError:
+                    pass
+                os._exit(SETUP_FAILED)
+
+        os.close(reason_w)
+        for fd in fds:
+            os.close(fd)
+        fds = []
+
+        status = wait_with_signals(conn, child)
+
+        reason = b""
+        try:
+            reason = os.read(reason_r, 1024)
+        except OSError:
+            pass
+        os.close(reason_r)
+
+        if os.WIFSIGNALED(status):
+            conn.sendmsg([result_message(RESULT_SIGNALLED, os.WTERMSIG(status))])
+        elif os.WEXITSTATUS(status) == SETUP_FAILED and reason:
+            text = reason.decode("utf-8", "replace")
+            log(f"setup failed: {text}")
+            conn.sendmsg([result_message(RESULT_ERROR, 3, reason)])
+        else:
+            conn.sendmsg([result_message(RESULT_EXITED, os.WEXITSTATUS(status))])
+
+    except Refused as e:
+        log(f"refused: {e}")
+        try:
+            conn.sendmsg([result_message(RESULT_ERROR, 1, str(e).encode())])
+        except OSError:
+            pass
+    except Exception as e:  # noqa: BLE001 - one bad request must not kill us
+        log(f"error: {e!r}")
+        try:
+            conn.sendmsg([result_message(RESULT_ERROR, 2, str(e).encode())])
+        except OSError:
+            pass
+    finally:
+        # fds still held here means the request was refused after they arrived;
+        # the success path empties the list once the child owns them.
+        for fd in fds + opened + [f for f in (pidfd, procfd) if f is not None]:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        conn.close()
+
+
+def recv_with_fds(conn):
+    space = socket.CMSG_SPACE(MAX_FDS * 4)
+    data, ancillary, flags, _ = conn.recvmsg(MAX_MESSAGE, space)
+    if flags & socket.MSG_TRUNC:
+        raise Refused("request larger than the protocol allows")
+
+    fds = []
+    for level, kind, payload in ancillary:
+        if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+            payload = payload[:len(payload) - (len(payload) % 4)]
+            fds.extend(struct.unpack(f"<{len(payload) // 4}i", payload))
+    if flags & socket.MSG_CTRUNC:
+        for fd in fds:
+            os.close(fd)
+        raise Refused("descriptor list truncated")
+    if len(fds) > MAX_FDS:
+        for fd in fds:
+            os.close(fd)
+        raise Refused("too many descriptors")
+    return data, fds
+
+
+def wait_with_signals(conn, child):
+    """Wait for the command, forwarding signals and noticing a lost client.
+
+    The client cannot deliver a signal to a process in another pid namespace,
+    so it sends one instead. And if the client disappears -- Codex killed, the
+    app closed -- the command it asked for must not be left running.
+    """
+    conn.settimeout(0.2)
+    while True:
+        pid, status = os.waitpid(child, os.WNOHANG)
+        if pid:
+            return status
+        try:
+            data = conn.recv(64)
+        except socket.timeout:
+            continue
+        except OSError:
+            data = b""
+
+        if not data:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except OSError:
+                pass
+            _, status = os.waitpid(child, 0)
+            return status
+
+        if len(data) >= 9 and data[:4] == MAGIC and data[4] == MSG_SIGNAL:
+            signo = struct.unpack("<I", data[5:9])[0]
+            if 0 < signo < signal.NSIG:
+                try:
+                    os.kill(child, signo)
+                except OSError:
+                    pass
+
+
+# --- startup -------------------------------------------------------------
+
+
+def listening_socket(app_id):
+    """Prefer the socket systemd already bound; fall back for manual runs."""
+    if os.environ.get("LISTEN_FDS") and os.environ.get("LISTEN_PID") == str(os.getpid()):
+        sock = socket.socket(fileno=3)
+        sock.setblocking(True)
+        return sock
+
+    runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    directory = os.path.join(runtime, "app", app_id)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    path = os.path.join(directory, "bwrap-broker.sock")
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    sock.bind(path)
+    os.chmod(path, 0o600)
+    sock.listen(16)
+    log(f"listening on {path}")
+    return sock
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--app-id", required=True,
+                        help="the only flatpak this instance will serve")
+    parser.add_argument("--bwrap",
+                        default="/app/libexec/flatpak-bwrap-broker/bwrap",
+                        help="path to the real bubblewrap, resolved inside the "
+                             "app's namespaces; never taken from the client")
+    args = parser.parse_args()
+
+    syslog.openlog(f"flatpak-bwrap-broker[{args.app_id}]")
+    if DEBUG:
+        log("BROKER_DEBUG=1: argv contents will be logged")
+
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    sock = listening_socket(args.app_id)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER)
+
+    while True:
+        try:
+            conn, _ = sock.accept()
+        except InterruptedError:
+            continue
+        except OSError as e:
+            if e.errno == errno.EBADF:
+                return 0
+            raise
+
+        # One process per request: setns(CLONE_NEWUSER) refuses a multithreaded
+        # caller, and a request that goes wrong then takes nothing with it.
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        child = os.fork()
+        if child == 0:
+            sock.close()
+            try:
+                serve(conn, args.app_id, args.bwrap)
+            finally:
+                os._exit(0)
+        conn.close()
+        signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

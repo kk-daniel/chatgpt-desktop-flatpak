@@ -1,0 +1,26 @@
+[Unit]
+Description=bubblewrap broker for %I
+Requires=flatpak-bwrap-broker@%i.socket
+After=flatpak-bwrap-broker@%i.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/libexec/flatpak-bwrap-broker/flatpak-bwrap-broker --app-id=%I
+UMask=0077
+KillMode=mixed
+Restart=on-failure
+RestartSec=1
+
+# Deliberately unhardened. This service exists to create namespaces, so
+# RestrictNamespaces=, SystemCallFilter=, PrivateUsers= and NoNewPrivileges=
+# would each break it outright. Adding them because they are usually good
+# advice would produce a broker that refuses every request.
+#
+# The confinement that matters is elsewhere: the socket is mode 0600 in the
+# user's runtime directory, every caller is authorised from SO_PEERPIDFD and
+# its own .flatpak-info, and the commands themselves run inside the calling
+# app's mount namespace under a seccomp filter that restores everything
+# flatpak blocks except the namespace group.
+
+[Install]
+WantedBy=default.target

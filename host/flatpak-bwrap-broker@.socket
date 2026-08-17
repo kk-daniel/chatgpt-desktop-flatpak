@@ -1,0 +1,18 @@
+[Unit]
+Description=bubblewrap broker socket for %I
+Documentation=file:///usr/share/doc/flatpak-bwrap-broker/README.md
+
+[Socket]
+# $XDG_RUNTIME_DIR/app/<app-id> is bound into the sandbox at the same path by
+# flatpak itself, so the app reaches this without any filesystem permission.
+# Measured on both sides: same inode, and a socket replaced while the app is
+# running is still found, because what the app holds is a bind of the
+# directory rather than of the file.
+ListenSequentialPacket=%t/app/%i/bwrap-broker.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+Service=flatpak-bwrap-broker@%i.service
+
+[Install]
+WantedBy=sockets.target

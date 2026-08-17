@@ -51,10 +51,25 @@ finish-args:
   # directory is granted; files reach the app through the file-chooser
   # portal instead.
   - --persist=.codex
-  # Electron safeStorage keeps the ChatGPT session token in the login
-  # keyring via libsecret. Without this the app cannot persist a login and
-  # re-prompts on every start.
-  - --talk-name=org.freedesktop.secrets
+  # Deliberately absent: --talk-name=org.freedesktop.secrets.
+  #
+  # Electron safeStorage would keep the session token in the login keyring
+  # through libsecret, and that grant is what makes it reachable. But the
+  # Secret Service specification does not require per-application isolation,
+  # and gnome-keyring and KWallet do not provide it: an app that can talk to
+  # the service can read every unlocked secret belonging to every other
+  # application. That is a large amount of access to hold in exchange for not
+  # re-entering one login.
+  #
+  # Without it Chromium's backend detection finds no usable keyring and falls
+  # back to encrypting the token with a built-in key inside the app's own data
+  # directory -- no worse, in practice, than a file in your home directory,
+  # since that is where it already was. --password-store is not forced in the
+  # launcher either, because forcing gnome-libsecret with no route to the
+  # service makes safeStorage fail instead of fall back.
+  #
+  # README.md documents the override for anyone who would rather have the
+  # keyring than the isolation. It is one command, and it is their call.
   - --talk-name=org.freedesktop.Notifications
   # Notification-area / tray (StatusNotifierItem on KDE & GNOME-via-extension,
   # AppIndicator on Ubuntu/Cinnamon). Without these the SNI registration
@@ -269,6 +284,40 @@ modules:
       - type: patch
         path: osslsigncode-ms-app-policies.patch
 
+  # The real bubblewrap, built against this runtime, because the broker needs a
+  # binary it can exec *inside* this sandbox's mount namespace.
+  #
+  # Built rather than taken from the ChatGPT payload even where the payload has
+  # one, and the reason is not the version. The payload unpacks into /var/data,
+  # which is ~/.var/app/<id>/data and therefore writable by the app -- so the
+  # broker would be exec'ing a binary its own caller can replace, while holding
+  # capabilities in namespace C. And the payload's contents are upstream's
+  # choice: a rename would break every sandboxed command on the user's machine
+  # after an auto-update, where a pinned tarball breaks the build instead.
+  # Renovate tracks it, and post-renovate refreshes the digest, so this is not
+  # hand-maintained.
+  #
+  # Installed to /app/libexec rather than /app/bin on purpose: /app/bin/bwrap
+  # is the client Codex must find on PATH, and this must not be reachable that
+  # way. It is inert here in any case -- run from inside the sandbox it fails
+  # exactly like Codex's own copy, because flatpak's seccomp filter denies the
+  # namespace syscalls. Only the broker, standing outside that filter, can use
+  # it.
+  - name: bubblewrap
+    buildsystem: meson
+    config-opts:
+      # bwrapdir puts it straight where it belongs; there is no /app/bin stage
+      # it could be picked up from by accident.
+      - -Dbwrapdir=/app/libexec/flatpak-bwrap-broker
+      - -Dman=disabled
+      - -Dtests=false
+      - -Dbash_completion=disabled
+      - -Dzsh_completion=disabled
+    sources:
+      - type: archive
+        url: https://github.com/containers/bubblewrap/releases/download/v0.11.2/bubblewrap-0.11.2.tar.xz
+        sha256: 69abc30005d2186baf7737feacd8da35633b93cf5af38838ecff17c5f8e924f6
+
   # No extra-data source: OpenAI serves the package only from a mutable
   # "latest" URL, so any sha256 pinned here would go stale on their next
   # release and break every fresh install until re-pinned. chatgpt-fetch
@@ -282,11 +331,12 @@ modules:
     build-commands:
       - install -Dm755 chatgpt.sh /app/bin/chatgpt
       - install -Dm755 chatgpt-fetch.sh /app/bin/chatgpt-fetch
-      # Installed as `bwrap` so Codex finds it on PATH ahead of its
-      # bundled copy. Flatpak denies the namespace syscalls bubblewrap
-      # needs, so the shim re-expresses the request as
-      # `flatpak-spawn --sandbox`, which needs no extra permission.
-      - install -Dm755 bwrap-shim.sh /app/bin/bwrap
+      # Installed as `bwrap` so Codex finds it on PATH ahead of its own
+      # copy. Flatpak denies the namespace syscalls bubblewrap needs, so
+      # this hands the request to the host broker, which runs the real
+      # bubblewrap from /app/libexec inside this sandbox's own namespaces.
+      # Nothing is translated on the way; see host/ and SANDBOXING.md.
+      - install -Dm755 bwrap-client.py /app/bin/bwrap
       - install -Dm644 expected-version /app/share/chatgpt/expected-version
       - install -Dm644 microsoft-roots.pem /app/share/chatgpt/microsoft-roots.pem
       - install -Dm644 ${FLATPAK_ID}.metainfo.xml -t /app/share/metainfo
@@ -309,7 +359,7 @@ modules:
       - type: file
         path: chatgpt-fetch.sh
       - type: file
-        path: bwrap-shim.sh
+        path: bwrap-client.py
       - type: file
         path: expected-version
       - type: file

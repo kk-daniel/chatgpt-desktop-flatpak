@@ -9,6 +9,13 @@ log() {
   printf '%s\n' "$*" >> "$log_file"
 }
 
+# Sandbox diagnostics live on the host now. Every bwrap call is handled by
+# flatpak-bwrap-broker, which logs to the journal:
+#
+#   journalctl --user -u flatpak-bwrap-broker@com.openai.ChatGPT.service -f
+#
+# so there is no in-sandbox log file to switch on, and no BWRAP_LOG.
+
 # The app mkdirs its state dir non-recursively, so a missing ~/.codex makes
 # the first session store fail with ENOENT.
 ensure_codex_dir() {
@@ -18,51 +25,23 @@ ensure_codex_dir() {
   fi
 }
 
-# The bwrap shim cannot hand a sandboxed command the caller's /tmp: the
-# portal always gives the child a fresh private tmpfs. Left unset, Codex
-# keeps declaring a policy the sandbox does not implement. Only ever adds --
-# an existing setting of either key is left alone, including an explicit
-# false, and any failure here costs the setting, not the launch.
-ensure_codex_sandbox_config() {
-  local cfg="$HOME/.codex/config.toml"
-  local section='[sandbox_workspace_write]'
-  local tmp
-
-  grep -qs 'exclude_slash_tmp\|exclude_tmpdir_env_var' "$cfg" && return 0
-
-  if [ ! -f "$cfg" ]; then
-    printf '%s\nexclude_slash_tmp = true\nexclude_tmpdir_env_var = true\n' \
-      "$section" > "$cfg" 2>/dev/null && log "Created $cfg with sandbox tmp settings"
-    return 0
-  fi
-
-  if grep -qsF "$section" "$cfg"; then
-    tmp="$cfg.chatgpt-new"
-    awk -v sec="$section" '
-      { print }
-      index($0, sec) == 1 && !done {
-        print "exclude_slash_tmp = true"
-        print "exclude_tmpdir_env_var = true"
-        done = 1
-      }
-    ' "$cfg" > "$tmp" 2>/dev/null &&
-      mv "$tmp" "$cfg" 2>/dev/null &&
-      log "Added sandbox tmp settings under existing $section"
-    rm -f "$tmp" 2>/dev/null
-  else
-    # A table header at end of file is always valid TOML and cannot land
-    # inside another table's scope.
-    printf '\n%s\nexclude_slash_tmp = true\nexclude_tmpdir_env_var = true\n' \
-      "$section" >> "$cfg" 2>/dev/null && log "Appended $section to $cfg"
-  fi
-  return 0
-}
+# Codex used to need exclude_slash_tmp/exclude_tmpdir_env_var written into
+# config.toml, because the portal could never hand a sandboxed command the
+# caller's /tmp. The broker runs bubblewrap inside this sandbox's own mount
+# namespace, so /tmp is simply there and Codex's default policy works. An
+# existing setting from an older install is harmless and is left alone.
 
 electron_args=()
-# Chromium picks its safeStorage backend from XDG_CURRENT_DESKTOP and falls
-# back to a hardcoded key on unrecognised desktops, which silently defeats
-# the --talk-name=org.freedesktop.secrets grant and loses the login.
-electron_args+=(--password-store=gnome-libsecret)
+# No --password-store here on purpose. The app has no route to the Secret
+# Service -- see the manifest for why that grant is not given -- and forcing
+# gnome-libsecret with nothing to talk to makes safeStorage fail rather than
+# fall back, which loses the login instead of degrading it. Left unset,
+# Chromium detects that no keyring is reachable and encrypts the token with a
+# built-in key under the app's own data directory.
+#
+# Anyone who would rather have the keyring can grant it back; README.md has the
+# two override commands, and ELECTRON_EXTRA_LAUNCH_ARGS is how the switch comes
+# back without editing this file.
 
 if [ -n "${WAYLAND_DISPLAY:-}" ] && [ "${ELECTRON_OZONE_PLATFORM_HINT:-wayland}" = "wayland" ]; then
   electron_args+=("--enable-features=UseOzonePlatform,WaylandWindowDecorations" --enable-wayland-ime --wayland-text-input-version=3)
@@ -73,7 +52,6 @@ if [ -n "${XRDP_SESSION:-}" ]; then
 fi
 
 ensure_codex_dir
-ensure_codex_sandbox_config
 
 # Populates /var/data/chatgpt, which /app/electron/{resources,assets}
 # symlink to.
@@ -97,7 +75,7 @@ done
 # /app/bin last, so it wins outright. Codex picks the first bwrap on PATH,
 # and a real one there -- from a tool extension, or a host install visible
 # through a --filesystem override, e.g. Homebrew's -- would be used instead
-# of our shim and then die on the blocked namespace syscalls.
+# of the broker client and then die on the blocked namespace syscalls.
 PATH="/app/bin:$PATH"
 export PATH
 log "PATH=$PATH"
