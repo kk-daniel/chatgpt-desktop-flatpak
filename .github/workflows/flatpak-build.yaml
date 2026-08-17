@@ -322,12 +322,19 @@ jobs:
           # rather than a bare uid, because flatpak resolves the home directory
           # through getpwuid.
           uid=1001
+          # Read the installation out of the environment rather than assuming
+          # /root: a container job's HOME is not the account's home directory,
+          # so hardcoding it copied an empty directory and the tests then
+          # reported the app as not installed, three layers from the cause.
+          src="${XDG_DATA_HOME:-$HOME/.local/share}/flatpak"
+          echo "HOME=$HOME  installation=$src"
+          flatpak --user info "${APP_ID}//${BRANCH}" >/dev/null
           if ! grep -q '^tester:' /etc/passwd; then
             echo "tester:x:$uid:$uid::/home/tester:/bin/bash" >> /etc/passwd
             echo "tester:x:$uid:" >> /etc/group
           fi
           mkdir -p /home/tester/.local/share
-          cp -al /root/.local/share/flatpak /home/tester/.local/share/flatpak
+          cp -al "$src" /home/tester/.local/share/flatpak
           # Hardlinks share inodes, so this reassigns root's installation too.
           # Harmless here: root ignores file permissions, and the later steps
           # that use it run as root.
