@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# The extension mount points below are empty unless the user installed
+# something, and a loop over a literal `*` is never what is wanted here.
+shopt -s nullglob
 
 log_dir="${XDG_CACHE_HOME:-$HOME/.cache}/chatgpt-flatpak"
 mkdir -p "$log_dir"
@@ -23,6 +26,56 @@ ensure_codex_dir() {
     mkdir -p "$HOME/.codex"
     log "Created $HOME/.codex"
   fi
+}
+
+# Extension diagnostics go to stderr rather than the launcher log, because a
+# misspelled extension name has to be visible to whoever typed it -- the log is
+# for the post-mortem, not for the one line that says why nothing happened.
+msg() {
+  printf '%s\n' "$*" >&2
+}
+
+# Opt-in SDK extensions. Nothing is declared in the manifest for these: the
+# runtime is org.freedesktop.Sdk, whose own extension point already mounts any
+# installed org.freedesktop.Sdk.Extension.* at /usr/lib/sdk/<name>.
+# FLATPAK_ENABLE_SDK_EXT takes a comma-separated list of short names -- golang,
+# not org.freedesktop.Sdk.Extension.golang -- or "*" for everything installed:
+#
+#   flatpak install flathub org.freedesktop.Sdk.Extension.golang//25.08
+#   flatpak run --env=FLATPAK_ENABLE_SDK_EXT=golang com.openai.ChatGPT
+#
+# Unset enables nothing, which is the right default: these are toolchains the
+# agent can run, and they should be there because someone asked for them.
+enable_sdk_extensions() {
+  local spec="${FLATPAK_ENABLE_SDK_EXT:-}"
+  local sdk=() dir ext
+  [ -n "$spec" ] || return 0
+  if [ "$spec" = "*" ]; then
+    for dir in /usr/lib/sdk/*; do
+      sdk+=("${dir##*/}")
+    done
+  else
+    IFS=',' read -ra sdk <<< "$spec"
+  fi
+  for ext in "${sdk[@]}"; do
+    [ -n "$ext" ] || continue
+    if [ ! -d "/usr/lib/sdk/$ext" ]; then
+      msg "Requested SDK extension \"$ext\" is not installed"
+      continue
+    fi
+    msg "Enabling SDK extension \"$ext\""
+    if [ -f "/usr/lib/sdk/$ext/enable.sh" ]; then
+      # Third-party script we do not control: drop errexit and nounset so a
+      # stray unset variable or failing command in it cannot take the launcher
+      # down before the app ever starts. pipefail is left alone.
+      set +eu
+      # shellcheck source=/dev/null
+      . "/usr/lib/sdk/$ext/enable.sh"
+      set -eu
+    else
+      export PATH="$PATH:/usr/lib/sdk/$ext/bin"
+    fi
+  done
 }
 
 # Codex used to need exclude_slash_tmp/exclude_tmpdir_env_var written into
@@ -71,6 +124,10 @@ export ELECTRON_OZONE_PLATFORM_HINT="${ELECTRON_OZONE_PLATFORM_HINT:-wayland}"
 for tool_bin in /app/tools/*/bin; do
   [ -d "$tool_bin" ] && PATH="$tool_bin:$PATH"
 done
+
+# Before the /app/bin prepend below, deliberately: an enable.sh is free to put
+# itself at the front of PATH, and /app/bin has to end up ahead of it anyway.
+enable_sdk_extensions
 
 # /app/bin last, so it wins outright. Codex picks the first bwrap on PATH,
 # and a real one there -- from a tool extension, or a host install visible

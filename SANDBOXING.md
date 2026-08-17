@@ -279,3 +279,63 @@ flatpak override --user --filesystem=~/src com.openai.ChatGPT
 ```
 
 Otherwise the host `codex` CLI remains the right tool for local work.
+
+### Adding toolchains
+
+What the runtime ships is not the limit. Two kinds of Flatpak extension can be
+mounted into the sandbox, and neither requires rebuilding the app.
+
+**Tool extensions** are the ones built for VS Code. The manifest declares the
+`com.visualstudio.code.tool` extension point, deliberately borrowing that ID
+prefix so the extensions already published on Flathub install here unmodified.
+Installing one is all there is to it — it unpacks to `/app/tools/<name>` and the
+launcher puts its `bin` on PATH:
+
+```bash
+flatpak install flathub com.visualstudio.code.tool.podman//25.08
+```
+
+The `//25.08` is not optional. An extension is only mounted when its branch
+matches the `version:` pinned in the manifest, and a mismatched one installs
+cleanly and then does nothing. `podman`, `fish` and `git-lfs` are what Flathub
+currently has.
+
+**SDK extensions** are the language toolchains — `golang`, `dotnet`, `llvm`,
+`php`, `rust-stable` and the rest. The runtime here is `org.freedesktop.Sdk`, so
+its own extension point mounts any installed one at `/usr/lib/sdk/<name>`
+already; the missing half is putting it on PATH, which is opt-in per launch
+through `FLATPAK_ENABLE_SDK_EXT`:
+
+```bash
+flatpak install flathub org.freedesktop.Sdk.Extension.golang//25.08
+```
+
+```bash
+flatpak run --env=FLATPAK_ENABLE_SDK_EXT=golang com.openai.ChatGPT
+```
+
+The variable takes short names — `golang`, not
+`org.freedesktop.Sdk.Extension.golang` — comma-separated for several, or `*` for
+everything installed. The launcher prefers the extension's own `enable.sh`, which
+sets up `GOROOT` and friends rather than just PATH, and says on stderr which
+extensions it enabled and which were asked for but not installed. To stop passing
+it every time:
+
+```bash
+flatpak override --user --env=FLATPAK_ENABLE_SDK_EXT=golang com.openai.ChatGPT
+```
+
+Leaving it unset enables nothing, which is the intended default: these are
+toolchains the agent can then run, so they should be present because someone
+asked for them.
+
+Neither mechanism covers `node` — the node24 extension is auto-installed and
+symlinked into `/app/bin`, so `node`, `npm` and `npx` work out of the box and MCP
+servers launched as `npx -y …` resolve without any of this.
+
+One trap when checking your work: `flatpak run --command=…` bypasses the
+launcher entirely, so nothing it exports is visible there.
+`flatpak run --command=ls com.openai.ChatGPT /usr/lib/sdk` proves the extension
+is *mounted*, but it will never show the PATH wiring. For that, look at the
+launcher's stderr, or at `PATH=` in
+`~/.var/app/com.openai.ChatGPT/cache/chatgpt-flatpak/launcher.log`.
