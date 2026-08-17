@@ -71,7 +71,17 @@ fi
 SOCK=$XDG_RUNTIME_DIR/app/$APP/bwrap-broker.sock
 
 # Run bwrap inside the app. Everything below goes through this.
-in_app() { flatpak run --command=bwrap "$REF" "$@" 2>&1; }
+#
+# --unshare-user on every call, because Codex passes it on every call and
+# without it the shape is ambiguous when the app runs as uid 0, which is what
+# CI does. Seeing euid 0, bubblewrap does not create a user namespace of its own
+# and expects to mount with root's authority -- but the broker has dropped every
+# capability by then, so CLONE_NEWNS is refused and the whole suite fails with
+# "Creating new namespace failed: Operation not permitted". At uid 1000
+# bubblewrap knows it is unprivileged and creates the namespace first, which is
+# why a desktop run does not show this. Asking for the namespace explicitly is
+# both what Codex does and unambiguous at either uid.
+in_app() { flatpak run --command=bwrap "$REF" --unshare-user "$@" 2>&1; }
 
 # --- the broker is not running yet: check that it fails properly ----------
 
@@ -207,11 +217,13 @@ echo
 echo "== descriptor-passing flags, which the portal could never carry =="
 tmp=$(mktemp -d)
 python3 -c "import struct,sys; sys.stdout.buffer.write(struct.pack('HBBI', 6, 0, 0, 0x7fff0000))" > "$tmp/allow.bpf"
-printf '%s\0' --ro-bind / / --chdir / > "$tmp/args"
+# --unshare-user inside the list as well, which also proves --args carries a
+# flag that changes how the sandbox is built and not just where it looks.
+printf '%s\0' --unshare-user --ro-bind / / --chdir / > "$tmp/args"
 # Handed in on real descriptors, the way Codex's helper does it.
 out=$(flatpak run --filesystem="$tmp:ro" --command=sh "$REF" -c "
   exec 8<'$tmp/allow.bpf'
-  bwrap --ro-bind / / --seccomp 8 --chdir / -- /bin/sh -c 'echo seccomp-fd-ok'
+  bwrap --unshare-user --ro-bind / / --seccomp 8 --chdir / -- /bin/sh -c 'echo seccomp-fd-ok'
   exec 7<'$tmp/args'
   bwrap --args 7 -- /bin/sh -c 'echo args-fd-ok'" 2>&1)
 for want in seccomp-fd-ok args-fd-ok; do
@@ -229,7 +241,7 @@ in_app --ro-bind / / --chdir / -- /bin/sh -c 'exit 42' >/dev/null 2>&1
 [ $? -eq 42 ] && ok "the command's exit status is returned" || bad "exit status was lost"
 
 out=$(printf 'from-stdin' | flatpak run --command=bwrap "$REF" \
-  --ro-bind / / --chdir / -- /bin/cat 2>/dev/null)
+  --unshare-user --ro-bind / / --chdir / -- /bin/cat 2>/dev/null)
 [ "$out" = "from-stdin" ] && ok "stdin reaches the command" || bad "stdin did not reach the command" "$out"
 
 err=$(in_app --ro-bind / / --chdir / -- /bin/sh -c 'echo to-stderr >&2' 2>&1 >/dev/null)
@@ -259,7 +271,7 @@ echo "== sandboxes do not nest =="
 # caller's own seccomp filter blocking connect() or from the broker's namespace
 # check, the message has to be intelligible.
 out=$(in_app --ro-bind / / --dev /dev --proc /proc --chdir / -- \
-  /app/bin/bwrap --ro-bind / / --chdir / -- /bin/echo should-not-run)
+  /app/bin/bwrap --unshare-user --ro-bind / / --chdir / -- /bin/echo should-not-run)
 if printf '%s' "$out" | grep -qx 'should-not-run'; then
   bad "a nested sandbox was created; it must be refused" "$out"
 elif printf '%s' "$out" | grep -qi 'already.*inside a sandbox\|already running inside'; then
