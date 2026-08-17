@@ -51,6 +51,13 @@ flatpak run com.openai.ChatGPT
 The Flatpak itself contains no OpenAI code. The ~700 MB package is fetched
 from OpenAI on **first launch**, not at install time — see below.
 
+Codex can only run what is inside the sandbox, but that set is extensible
+without rebuilding: the VS Code tool extensions (`podman`, `fish`, `git-lfs`)
+install straight in, and the `org.freedesktop.Sdk.Extension.*` toolchains
+(`golang`, `dotnet`, `llvm`, …) are enabled per launch with
+`FLATPAK_ENABLE_SDK_EXT`. See
+[Adding toolchains](SANDBOXING.md#adding-toolchains).
+
 ## The parts that need work on Linux
 
 Four things are wrong with the official payload on Linux:
