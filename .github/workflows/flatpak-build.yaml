@@ -317,12 +317,12 @@ jobs:
           REQUIRE_BROKER_LIVE: 1
         run: |
           set -eux
-          echo "tools: $(command -v setpriv || echo 'no setpriv') $(command -v getent || echo 'no getent')"
-          # The image has no shadow-utils, so the account is written directly.
-          # It needs a passwd entry rather than just a uid because flatpak
-          # resolves the home directory through getpwuid.
+          # The image has neither shadow-utils nor setpriv, so the account is
+          # written directly and the switch is done by run-as-uid.py. An entry
+          # rather than a bare uid, because flatpak resolves the home directory
+          # through getpwuid.
           uid=1001
-          if ! getent passwd tester >/dev/null 2>&1; then
+          if ! grep -q '^tester:' /etc/passwd; then
             echo "tester:x:$uid:$uid::/home/tester:/bin/bash" >> /etc/passwd
             echo "tester:x:$uid:" >> /etc/group
           fi
@@ -334,13 +334,9 @@ jobs:
           chown -R "$uid:$uid" /home/tester
           install -d -o "$uid" -g "$uid" -m 700 "/run/user/$uid"
           chmod -R a+rX .
-          # setpriv rather than su: no PAM, no session setup, and it is
-          # util-linux, which this image already has because flatpak needs it.
-          setpriv --reuid="$uid" --regid="$uid" --clear-groups \
-            env HOME=/home/tester USER=tester PATH="$PATH" \
-                XDG_RUNTIME_DIR="/run/user/$uid" \
-                BRANCH="$BRANCH" REQUIRE_BROKER_LIVE=1 \
-                bash host/test-broker-live.sh
+          export HOME=/home/tester USER=tester
+          export XDG_RUNTIME_DIR="/run/user/$uid"
+          python3 host/run-as-uid.py "$uid" bash host/test-broker-live.sh
 
       # The risky logic now runs on the user's machine at first launch, so
       # exercise it for real: download the current package and unpack it
