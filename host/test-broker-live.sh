@@ -77,12 +77,30 @@ if [ "$rc" -eq 127 ] && printf '%s' "$out" | grep -q 'broker is not running'; th
 else
   bad "a missing broker should fail with 127 and an explanation" "rc=$rc: $out"
 fi
+# Both halves have to be offered: the socket being absent usually means the
+# broker was never installed, and "systemctl enable" alone would then answer
+# "Unit not found" and leave the user no further forward.
+if printf '%s' "$out" | grep -q 'install\.sh' &&
+   printf '%s' "$out" | grep -q 'systemctl --user enable'; then
+  ok "the message covers both never-installed and installed-but-stopped"
+else
+  bad "the message should offer install.sh as well as systemctl" "$out"
+fi
 # The one thing that must never happen: falling back to running the command
 # with less isolation than was asked for.
 if printf '%s' "$out" | grep -qi 'flatpak-spawn\|--host'; then
   bad "a missing broker must not mention a fallback path" "$out"
 else
   ok "a missing broker does not fall back"
+fi
+# Codex swallows a failing command's stderr, and with no broker there is no
+# journal on the other side either, so the reason has to survive somewhere.
+logged=$(flatpak run "${BRANCH_ARGS[@]}" --command=cat "$APP" \
+  /var/cache/chatgpt-flatpak/bwrap-error.log 2>/dev/null)
+if printf '%s' "$logged" | grep -q 'broker is not running'; then
+  ok "the reason is also left in /var/cache/chatgpt-flatpak/bwrap-error.log"
+else
+  bad "the failure was not recorded where it can be found later" "$logged"
 fi
 
 # --- start the broker ----------------------------------------------------

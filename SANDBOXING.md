@@ -15,201 +15,228 @@ unprivileged user namespaces — and Flatpak denies those unconditionally.
 in flatpak's `syscall_blocklist[]`, not the `nondevel` one, so `--allow=devel`
 does not lift them either. Left alone, every sandboxed command fails.
 
-`/app/bin/bwrap` is a shim that takes bubblewrap's place on `PATH` (Codex
-looks there before falling back to its bundled copy) and re-expresses the
-request as `flatpak-spawn --sandbox`. The portal builds that sandbox on the
-host, with privileges the app does not have, and hands back a confined
-child — so the isolation Codex asked for is preserved rather than disabled.
+Measured rather than assumed:
 
-The child is **not** outside the seccomp filter, and it is worth being
-precise about that because it rules out the obvious alternative. Measured:
+```
+plain                     unshare: Operation not permitted
+--allow=devel             unshare: Operation not permitted
+--allow=devel+multiarch   unshare: Operation not permitted
+```
+
+The app's seccomp filter is byte-identical with and without `devel`, so there is
+no flatpak option that makes bubblewrap work from inside.
+
+## The broker
+
+`/app/bin/bwrap` takes bubblewrap's place on `PATH` — Codex looks there before
+falling back to its own copy — and hands the request to a small service running
+on the host. That service steps into this sandbox's **own** namespaces and runs
+the real bubblewrap there, with the arguments Codex wrote, unchanged.
+
+```
+Codex -> /app/bin/bwrap -> SOCK_SEQPACKET in $XDG_RUNTIME_DIR/app/<id>/
+      -> flatpak-bwrap-broker on the host
+      -> setns into this sandbox's user, pid, net, ipc, uts and mount namespaces
+      -> /app/libexec/flatpak-bwrap-broker/bwrap
+      -> Codex's command
+```
+
+All of them, not only the mount namespace. The network one matters
+independently: an app without `--share=network` gets its own, and a command
+left in the broker's would have host network — an escape that would not show up
+on this app, which has `--share=network` anyway.
+
+It is installed separately, because a flatpak cannot install a host service and
+should not be able to:
 
 ```bash
-flatpak run --command=sh com.openai.ChatGPT -c 'cd /; flatpak-spawn --sandbox --directory=/ /bin/sh -c "unshare --user --map-root-user true"'
+bash host/install.sh com.openai.ChatGPT
 ```
 
-fails with `Operation not permitted`, exactly as it does in the app itself.
-Nothing anywhere in this chain can create a user namespace. So bubblewrap
-cannot be relocated into the portal child and run there unchanged; the
-request has to be translated, which is what follows.
+Without it, sandboxed commands fail with a message naming what to run — both
+`host/install.sh` and `systemctl --user enable`, because from inside the sandbox
+a missing socket cannot be told apart from a stopped service. There is
+deliberately no fallback to `flatpak-spawn --host` or to running unsandboxed: a
+missing broker means less isolation than Codex asked for, and that is a thing to
+report, not to work around.
 
-This needs **no extra permission**. `--sandbox` goes through the portal and
-can only drop privileges; `--host` would need
-`--talk-name=org.freedesktop.Flatpak` and is a full sandbox escape, which is
-why it is not used. Untranslatable flags are refused outright rather than
-silently dropped.
+That message is also written to
+`~/.var/app/com.openai.ChatGPT/cache/chatgpt-flatpak/bwrap-error.log`, which is
+`/var/cache/chatgpt-flatpak/bwrap-error.log` from inside. It has to be, because
+Codex swallows a command's stderr when the command fails, and a broker that is
+not running has no journal to write to either — so the case where the message
+matters most is the one where it would otherwise vanish. The file holds only the
+most recent failure, so it cannot grow while Codex retries.
 
-The refusal reaches stderr, which Codex swallows when a command fails, so
-there is a log for the sessions that need explaining — off by default,
-because every command Codex runs passes through the shim and the file has
-no rotation:
+### How it can step in without root
 
-```bash
-flatpak override --user --env=BWRAP_LOG=1 com.openai.ChatGPT
-```
+Flatpak runs bwrap with `--disable-userns`, which makes bwrap create user
+namespace **A**, set up the mounts there, and then nest the app in a second
+namespace **B**. `cap_capable()` grants the owner of a user namespace, seen from
+that namespace's parent, every capability in it. A was created by this uid from
+the initial namespace, so the broker — an ordinary process of the same user —
+holds `CAP_SYS_ADMIN` in A and may `setns()` into it, and from there into the
+mount namespace A owns.
 
-Each invocation then appends its original argv, the translated
-`flatpak-spawn` arguments and the rewritten command to
-`~/.var/app/com.openai.ChatGPT/cache/chatgpt-flatpak/bwrap.log`. With it on,
-an empty log is itself an answer: it means Codex never reached the shim,
-which points at `PATH` rather than at the translation.
+Joining B, the app's own namespace, is not enough and looks like a permissions
+bug until the topology is visible: capabilities do not flow from a child
+namespace up to its parent, so a process in B has none in A, and the mount
+namespace refuses. `host/diagnose-namespaces.sh` prints the chain.
 
-Codex re-executes filesystem operations with a minimal environment containing
-only `PATH` and temporary-directory variables. `chatgpt.sh` therefore turns
-logging on by creating the target of the build-time `/app/bin/bwrap.log`
-symlink; the shim checks that file instead of `BWRAP_LOG` itself. The shim also
-reconstructs `HOME`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and the app
-ID before it contacts the Flatpak portal.
+### Why the mounts are not copied
 
-The two models differ in shape, so the translation is not literal. Codex is
-*subtractive* — bind the whole root read-only, then carve out writable spots
-and mask directories with an empty tmpfs. The portal is *additive* — start
-from the runtime with nothing of the host, then expose paths one at a time.
-The mapping that follows from that:
+An earlier design built an outer bwrap around a clone of `/proc/<pid>/root`.
+It cannot work, and the reasons are worth recording because both failures look
+like something fixable.
 
-| Codex | Shim |
-| --- | --- |
-| `--bind X X` / `--ro-bind X X` | `--sandbox-expose-path[-ro]=X` |
-| `--perms 555 --tmpfs X --remount-ro X` (mask) | `--sandbox-expose-path-ro=X` |
-| `--ro-bind / /` | expose `~/.var/app/<id>` read-only; the child gets the runtime root elsewhere |
-| `--bind /tmp /tmp` and `/tmp` masks | dropped; the child has its own tmpfs |
-| `--argv0 NAME` | replayed with `exec -a` |
+`bwrap --bind /proc/<pid>/root /` fails with `Permission denied` even though a
+plain shell can read that path. bwrap resolves its source paths *after*
+unsharing its own user namespace, and the app's `mm` is not dumpable, so access
+needs capabilities in the namespace the `mm` belongs to. From the initial
+namespace this uid has them; from bwrap's sibling namespace it does not.
 
-Two things to know about that table. A nested read-only exposure does
-override a writable parent, so masking still prevents writes — the agent
-cannot plant a `.git/hooks/pre-commit` that would later run outside the
-sandbox. What it no longer does is *hide* the directory: masked paths are
-readable where Codex made them disappear.
+`--bind-fd` is worse. bwrap resolves the descriptor back to a path — and
+`readlink /proc/<pid>/root` is `/` — so it bind-mounted the **host** root and
+then caught the mismatch in its own sanity check — the host root is mode 0555
+and the descriptor it was handed was mode 0755. That check is the only thing
+that stopped it.
 
-And `/tmp` cannot be exposed at all — it is a per-instance tmpfs, so the
-child always gets a fresh private one. Codex has to be told to stop asking
-for the shared one, or it keeps declaring a policy the sandbox does not
-implement. The launcher writes this into `~/.codex/config.toml` on start if
-neither key is set:
+Stepping into the real mount namespace avoids the question entirely. The
+filesystem the command sees is flatpak's because it *is* flatpak's: same
+namespace, not a reconstruction of one. Nothing here has to track how flatpak
+mounts things.
 
-```toml
-[sandbox_workspace_write]
-exclude_slash_tmp = true
-exclude_tmpdir_env_var = true
-```
+### What this costs
 
-It only ever adds. An existing value of either key is left alone — including
-an explicit `false` — and any other settings in the file are preserved.
+Two things, both consequences of the goal rather than oversights.
 
-Flatpak maps several guest paths into private per-app host storage:
-`/var/data`, `/var/config`, `/var/cache`, `/var/tmp`, and `$HOME/.codex`
-under `--persist`. `flatpak-spawn` opens an `O_PATH` fd in the caller and the
-portal verifies that the same absolute path on the host names the same inode.
-The guest spelling of a remapped mount fails that check, so exposures must use
-the real `~/.var/app/<id>/…` path.
+**The namespace syscalls.** Commands do not run under flatpak's seccomp filter,
+because that filter is exactly what stops bubblewrap. Most of the policy is put
+back by the broker immediately before exec — the kernel keyring, `ptrace`,
+`perf_event_open`, the NUMA calls, the non-IP socket families — and seccomp
+filters survive `execve` and namespace creation, so one filter covers
+bubblewrap, Codex's helper and the command. What is actually given up is the
+namespace group: `clone`, `unshare`, `setns`, `mount`, `umount2`, `pivot_root`,
+`chroot`, `clone3`.
 
-A native `--ro-bind / /` makes all of those paths readable. The shim mirrors
-that by exposing the complete `~/.var/app/<id>` root read-only instead of
-special-casing `shell_snapshots`, `attachments`, or any other current
-subdirectory. More specific writable binds remain nested overrides.
+Any code inside the app can reach the broker's socket, so the app's effective
+syscall surface becomes its own plus that group. That is the honest statement
+of what installing the broker changes, and it is why it is opt-in and separately
+installed. The filesystem view and the network are unchanged, because they come
+from the same namespaces the app already has.
 
-The same mapping is applied to working directories, environment values and
-every command argument, including paths embedded in the shell script Codex
-hands to `sh -c`. Pasted text, uploaded files and future private-state paths
-therefore work without per-feature exposure rules.
+**`max_user_namespaces`.** `--disable-userns` works by exhausting the quota in
+A, and the inner bwrap needs two namespaces. The broker raises it and leaves it
+raised. Restoring it would break commands running concurrently, and it protects
+nothing: the app's own `unshare` is refused by the seccomp filter whatever the
+limit says.
 
-### The command Codex actually asked for
+### Sandboxes do not nest
 
-What Codex hands bwrap is not the command it wants run. It is its own
-helper, re-executed under `argv[0]` `codex-linux-sandbox`, with the real
-command after a second `--`. By that point the helper's remaining job is to
-apply seccomp and exec — the mounts were asked for in the bwrap flags, and
-those flags are the permission profile written in bubblewrap's terms.
+A command Codex has already sandboxed can see the broker's socket. It is
+refused, and the refusal is deliberate rather than incidental.
 
-The helper cannot run on this side, in two independent ways. It re-execs
-through file descriptors the portal does not carry, which surfaces as
-`--bind-fd: Not an open file descriptor: 15` from a bare `pwd`. And its
-Landlock fallback, which `features.use_legacy_landlock = true` selects,
-panics rather than enforce something other than what was asked:
+The broker joins the *caller's* namespaces, so a nested request's filesystem
+view would be correctly nested — a command restricted to a read-only workspace
+could not ask for a writable one. What it could shed is seccomp. The broker's
+child is forked from the broker, and a seccomp filter is inherited only from a
+parent, so Codex's own filter would not come along. A command confined by it
+would end up less confined than the one that asked, which is backwards.
 
-```
-permission profiles requiring direct runtime enforcement are
-incompatible with --use-legacy-landlock
-```
+The broker therefore checks the shape of the namespace chain: the user
+namespace owning the app's mount namespace is created by flatpak's bwrap
+directly from the broker's own, so its parent is the broker's, and anything
+created inside a sandbox is at least one level deeper.
 
-The desktop app's profile trips that check — protected `.git`, `.agents`
-and `.codex` names, `missing_path_behavior: skip`, and a writable root
-outside the workspace — and the profile's shape is the app's to choose,
-not ours.
+Usually the caller's own filter refuses `connect()` first, so this appears as
+`Operation not permitted` from the client rather than a message from the
+broker. The client recognises that errno and says what it means.
 
-So the shim drops the helper and runs the command it was wrapping. The
-policy does not go with it: the same bwrap flags the helper would have
-enforced are portal exposures by then, and `--unshare-net` is already
-`--no-network`. What is lost is Codex's seccomp network filter layered on
-top of the network namespace — two mechanisms for one boundary reduced to
-one. Proxy mode is the exception and is refused outright, since it bridges
-the child's traffic through a listener the shim plays no part in.
+### The uid, which is easy to get wrong
 
-The recognition is deliberately narrow: `argv[0]` must be
-`codex-linux-sandbox`, and the command must contain
-`--apply-seccomp-then-exec` followed by `--`. Anything else passes through
-untouched, so a change upstream breaks loudly instead of quietly running a
-command with less around it than Codex believes.
+The broker arrives in A as uid 0 with a full capability set, and bubblewrap
+passes that straight to the command — measured, `child uid=0 CapEff
+000001ffffffffff`, which is a great deal more than Codex asked for. So before
+exec the broker creates one more user namespace mapping that 0 back to the app's
+own uid, drops every capability and sets `no_new_privs`. Doing it there rather
+than by adding `--uid` to the command line is what lets Codex's arguments reach
+bubblewrap literally unmodified.
 
-## What the child can actually reach
+## What disappeared with the portal
 
-Measured, not assumed:
+The previous implementation re-expressed each call as `flatpak-spawn --sandbox`.
+The portal is *additive* — start from the runtime with nothing of the host and
+expose paths one at a time — where Codex is *subtractive*, so the two never
+matched, and a translation table stood between them. All of it is gone:
 
-| | Result |
-| --- | --- |
-| path with no exposure | not present at all -- `/mnt` lists empty |
-| `--sandbox-expose-path-ro` | readable, writes refused |
-| `--sandbox-expose-path` | writable, and the writes persist |
-| a nested `-ro` inside a writable exposure | writes refused (this is what makes masking work) |
-| `/etc`, `/var`, `/run`, `/home`, `/mnt`, `/tmp` | writable, but **discarded** when the command exits |
+* **Path rewriting.** Flatpak maps `/var/data`, `/var/config`, `/var/cache`,
+  `/var/tmp` and `$HOME/.codex` into private per-app storage, and the portal
+  only accepted the host spelling. Inside the app's own mount namespace the
+  guest spelling is the real one.
+* **`--tmpfs` refusals.** The portal could not mount a tmpfs at an arbitrary
+  destination, so masks were refused outright. Real bubblewrap does them.
+* **`/tmp`.** The portal always gave the child a fresh private tmpfs, so the
+  launcher wrote `exclude_slash_tmp` and `exclude_tmpdir_env_var` into
+  `config.toml`. No longer needed; an existing setting from an older install is
+  harmless and is left alone.
+* **Dropping `codex-linux-sandbox`.** Codex's helper re-execs through file
+  descriptors the portal did not carry, which surfaced as `--bind-fd: Not an
+  open file descriptor: 15`. Descriptors cross the broker's socket over
+  `SCM_RIGHTS` and are restored to their original numbers before exec, so the
+  helper runs as Codex intended and its seccomp filter is applied.
+* **The fidelity gap.** Under the portal, `/etc`, `/var`, `/run`, `/home` and
+  `/tmp` were writable but discarded, so a command that wrote there and checked
+  only the exit status believed it had succeeded. The mounts are flatpak's now,
+  so a write that should fail does.
 
-Only an explicitly exposed path persists to the host. Everything else the
-child can write belongs to its own throwaway root, including the parent
-directory of an exposed workspace.
+## What can be tested where
 
-That last row is a fidelity gap rather than a leak, and it cannot be closed:
-`--sandbox-expose-path-ro=/etc` is a no-op, because exposures resolve
-against the caller's instance tree and hand over open file descriptors --
-they can add paths to the child, never change the mounts it gets from the
-runtime. So a command that writes `/etc/something` and checks only the exit
-status believes it succeeded, where Codex's own bwrap policy would have
-returned `Permission denied`. Nothing reaches the host either way.
+Both layers run in CI, and that is new. The portal implementation could not be
+tested there at all — reaching the portal needs a session bus and the build
+container has none, so `flatpak-spawn` got as far as `Cannot spawn a message bus
+without a machine-id` and everything about what a sandboxed command could reach
+was left to manual desktop runs. The broker talks over a unix socket and needs
+no bus, and binds its own socket when systemd is not there, so the real
+properties are now asserted on every build.
 
-Each command starts a fresh Flatpak instance, costing a few hundred
-milliseconds, and the child has no session bus (flatpak disables it for
-`--sandbox`), so commands needing D-Bus will not work.
+`python3 host/test-broker.py` needs neither an app nor a broker. It interprets
+the seccomp program rather than reading it, because a miscomputed BPF jump offset
+fails *open*; it round-trips the wire protocol between the client's encoder and
+the broker's decoder, including non-UTF-8 arguments; and it checks the argument
+walk that decides which descriptors are forwarded.
 
-That table is also the part headless CI cannot check. Reaching the portal
-needs a session bus, and the build container has none — `flatpak-spawn` gets
-as far as `Cannot spawn a message bus without a machine-id` and stops.
-`test-bwrap-shim.sh` therefore always asserts the *translation*: it compares
-the line logged just before the spawn against the expected arguments and
-repeats the capability probe with the same minimal environment as Codex's
-filesystem helper. It also tests the launcher's logging switch through the
-installed `/app/bin/bwrap.log` link.
+`bash host/test-broker-live.sh` runs against an installed flatpak with a live
+broker, and it is the one that earns trust. Every bug found while building this
+was in the namespace entry, where unit tests cannot go:
 
-On a desktop with a session bus, the same test goes further: the minimal
-filesystem-helper environment must execute `/bin/true` through the portal,
-and, when the ChatGPT payload has been downloaded, the packaged `apply_patch`
-must complete a create/update/delete sequence through three consecutive bwrap
-calls. Set `REQUIRE_BWRAP_PORTAL=1` and `REQUIRE_CODEX_APPLY_PATCH=1` to turn
-either conditional check into a required one. File-descriptor flags remain
-out of reach because `flatpak run` has nowhere to hand one in. Whether the
-child is actually confined still has to be re-measured on a desktop after
-any change to the translation:
+* the network namespace was not joined, so a command would have had host network
+  on any app without `--share=network`;
+* setup failures were written to the journal by a child with no connection to
+  the client, so a broken sandbox looked like empty output;
+* an off-by-one in the argv convention dropped the first bwrap flag, so
+  sandboxes ran with one less restriction than Codex asked for **and reported
+  success**.
 
-```bash
-flatpak run --command=bwrap com.openai.ChatGPT --unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/sh -c 'echo ok; ls /mnt'
-```
+That last one is the reason the live tests are required rather than
+best-effort. It passed every unit test, and it passed a manual `apply_patch`
+run too.
 
-which must print `ok` and fail to list `/mnt`.
+Two smaller scripts back specific claims made above.
+`host/test-seccomp-parity.sh` compares the broker's policy against the app's own
+filter in both directions, so the syscall list is not merely a claim about
+flatpak's source; the live suite runs it too.
+`host/diagnose-namespaces.sh` prints the user-namespace chain and the ownership
+of the mount namespace. Run it after a flatpak or kernel update, or whenever the
+broker refuses with something about the namespace chain: that means the topology
+this whole approach rests on has moved.
 
-The practical limit is reach, not tooling. The runtime is the freedesktop
-**Sdk**, so `git`, `gcc`, `make` and `python3` are present, and `node`/`npx`
-come from the node24 extension — but the agent can only see the sandbox, not
-your checkouts. The portal can only expose paths **this app already has**, so
-the shim cannot hand Codex a directory the Flatpak itself cannot reach. Grant
-one explicitly if you want the agent to work on it:
+## Reach
+
+The runtime is the freedesktop **Sdk**, so `git`, `gcc`, `make` and `python3`
+are present, and `node`/`npx` come from the node24 extension — but the agent can
+only see the sandbox, not your checkouts. The broker runs commands inside the
+app's mount namespace, so it cannot show Codex a directory the flatpak itself
+cannot reach. Grant one explicitly if you want the agent to work on it:
 
 ```bash
 flatpak override --user --filesystem=~/src com.openai.ChatGPT

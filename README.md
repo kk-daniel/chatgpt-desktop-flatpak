@@ -113,27 +113,34 @@ host-installed `codex` CLI — the two keep separate configuration and
 history. Files reach the app through the file-chooser portal.
 
 > [!IMPORTANT]
-> **Codex's own sandbox does not run here. This package replaces it.**
+> **Codex's sandbox needs a small service on the host, installed separately.**
 >
-> Codex isolates every command it runs with **bubblewrap**, which needs
-> user namespaces — and nothing inside a Flatpak can create one, not the
-> app and not the portal's children either. Its Landlock fallback refuses
-> the profile the desktop app builds. So neither of Codex's two enforcement
-> backends works, and every sandboxed command failed outright.
+> Codex isolates every command it runs with **bubblewrap**, which needs user
+> namespaces — and nothing inside a Flatpak can create one. `unshare`,
+> `setns`, `mount` and `clone(CLONE_NEWUSER)` are in flatpak's unconditional
+> seccomp blocklist, and `--allow=devel` does not lift them. Left alone,
+> every sandboxed command fails.
 >
-> Instead, `/app/bin/bwrap` takes bubblewrap's place on `PATH`, translates
-> the request into `flatpak-spawn --sandbox`, and **drops Codex's own
-> sandbox helper**, running the command the helper was wrapping. The
-> requested policy is preserved — it is carried by the same bwrap flags the
-> shim turns into portal exposures — but it is the **Flatpak portal, not
-> Codex, that enforces it**, and one layer is genuinely gone: Codex's
-> seccomp network filter on top of the network namespace.
+> ```sh
+> bash host/install.sh com.openai.ChatGPT
+> ```
 >
-> Read [SANDBOXING.md](SANDBOXING.md) before trusting this with anything
-> you would not hand a process confined only by this Flatpak. It documents
-> what the sandboxed child can actually reach, where the translation is
-> less faithful than bubblewrap, and how to grant the agent a directory to
-> work in.
+> `/app/bin/bwrap` takes bubblewrap's place on `PATH` and hands each request
+> to that service, which steps into the app's **own** namespaces and runs the
+> real bubblewrap there with Codex's arguments unchanged. Nothing is
+> translated and nothing is dropped: the command's filesystem view is the
+> app's because it is literally the same mount namespace.
+>
+> The cost is one group of syscalls. Commands cannot run under flatpak's
+> seccomp filter, since that filter is exactly what stops bubblewrap; the
+> broker puts back everything in flatpak's policy except `clone`, `unshare`,
+> `setns`, `mount`, `umount2`, `pivot_root`, `chroot` and `clone3`. Any code
+> in the app can reach the broker, so the app's effective syscall surface
+> grows by that group. That is why it is opt-in and not part of the Flatpak.
+>
+> Read [SANDBOXING.md](SANDBOXING.md) before trusting this with anything you
+> would not hand a process confined only by this Flatpak, and
+> [host/README.md](host/README.md) for how the broker authorises callers.
 
 ## Why the payload is fetched at first launch
 
