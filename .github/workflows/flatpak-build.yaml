@@ -32,7 +32,7 @@ jobs:
     # Match on the group slug the branch ends with, not the whole name: with
     # separateMultipleMajor the majors arrive as renovate/major-<N>-<group>,
     # and an exact-name gate would silently skip them.
-    if: github.event_name == 'pull_request' && github.actor == 'renovate[bot]' && startsWith(github.head_ref, 'renovate/') && (endsWith(github.head_ref, 'chatgpt') || endsWith(github.head_ref, '7zip'))
+    if: github.event_name == 'pull_request' && github.actor == 'renovate[bot]' && startsWith(github.head_ref, 'renovate/') && (endsWith(github.head_ref, 'chatgpt') || endsWith(github.head_ref, '7zip') || endsWith(github.head_ref, 'bubblewrap'))
     steps:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
@@ -58,6 +58,13 @@ jobs:
       - name: Update 7-Zip checksums
         if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, '7zip')
         run: '"./${APP_ID}/update-7zip-checksum.sh"'
+      # bubblewrap is the one component whose provenance is load-bearing: it is
+      # what the broker execs to build every sandbox. Renovate raises the
+      # version in the URL and this refreshes the digest beside it, so the
+      # tarball is still verified against something rather than merely fetched.
+      - name: Update bubblewrap checksum
+        if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, 'bubblewrap')
+        run: '"./${APP_ID}/update-bwrap-checksum.sh"'
       - name: Get last commit message
         id: last-commit
         run: |
@@ -294,11 +301,36 @@ jobs:
       # The job container is --privileged, so user namespaces work. Required
       # rather than best-effort: a skip here would quietly restore exactly the
       # blind spot that made the previous implementation hard to trust.
+      # As an ordinary user, not as the container's root. The broker refuses to
+      # serve an app running as root: bubblewrap reads euid 0 as privileged and
+      # then does not drop capabilities for the command, which would hand it
+      # CAP_SYS_ADMIN and let it remount away the read-only root Codex asked
+      # for. Measured, not assumed -- it is why the earlier attempt to
+      # accommodate root was abandoned.
+      #
+      # The app is installed into root's user installation by the step above, so
+      # the test user gets a hardlinked copy. Same filesystem, so it costs
+      # inodes rather than bytes.
       - name: Test the sandbox against the installed flatpak
         env:
           BRANCH: ${{ steps.clean-branch-name.outputs.branch }}
           REQUIRE_BROKER_LIVE: 1
-        run: bash host/test-broker-live.sh
+        run: |
+          set -eux
+          id -u tester >/dev/null 2>&1 || useradd -m tester
+          install -d -m 755 /home/tester/.local/share
+          cp -al /root/.local/share/flatpak /home/tester/.local/share/flatpak
+          # Hardlinks share inodes, so this reassigns root's installation too.
+          # Harmless here: root ignores file permissions, and the later steps
+          # that use it run as root.
+          chown -R tester:tester /home/tester
+          install -d -o tester -g tester -m 700 "/run/user/$(id -u tester)"
+          chmod -R a+rX .
+          su tester -s /bin/bash -c "
+            cd '$PWD'
+            export XDG_RUNTIME_DIR='/run/user/$(id -u tester)'
+            export BRANCH='$BRANCH' REQUIRE_BROKER_LIVE=1
+            bash host/test-broker-live.sh"
 
       # The risky logic now runs on the user's machine at first launch, so
       # exercise it for real: download the current package and unpack it

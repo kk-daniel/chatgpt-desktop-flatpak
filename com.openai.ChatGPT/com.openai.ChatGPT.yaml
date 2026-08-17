@@ -269,11 +269,18 @@ modules:
       - type: patch
         path: osslsigncode-ms-app-policies.patch
 
-  # The real bubblewrap, built against this runtime. Neither the runtime nor
-  # the ChatGPT payload ships one -- Codex falls back to a helper, not to a
-  # bundled binary, so there is nothing to reuse -- and the
-  # broker needs a binary it can exec *inside* this sandbox's mount namespace,
-  # so it has to come from /app.
+  # The real bubblewrap, built against this runtime, because the broker needs a
+  # binary it can exec *inside* this sandbox's mount namespace.
+  #
+  # Built rather than taken from the ChatGPT payload even where the payload has
+  # one, and the reason is not the version. The payload unpacks into /var/data,
+  # which is ~/.var/app/<id>/data and therefore writable by the app -- so the
+  # broker would be exec'ing a binary its own caller can replace, while holding
+  # capabilities in namespace C. And the payload's contents are upstream's
+  # choice: a rename would break every sandboxed command on the user's machine
+  # after an auto-update, where a pinned tarball breaks the build instead.
+  # Renovate tracks it, and post-renovate refreshes the digest, so this is not
+  # hand-maintained.
   #
   # Installed to /app/libexec rather than /app/bin on purpose: /app/bin/bwrap
   # is the client Codex must find on PATH, and this must not be reachable that
@@ -293,8 +300,8 @@ modules:
       - -Dzsh_completion=disabled
     sources:
       - type: archive
-        url: https://github.com/containers/bubblewrap/releases/download/v0.11.0/bubblewrap-0.11.0.tar.xz
-        sha256: 988fd6b232dafa04b8b8198723efeaccdb3c6aa9c1c7936219d5791a8b7a8646
+        url: https://github.com/containers/bubblewrap/releases/download/v0.11.2/bubblewrap-0.11.2.tar.xz
+        sha256: 69abc30005d2186baf7737feacd8da35633b93cf5af38838ecff17c5f8e924f6
 
   # No extra-data source: OpenAI serves the package only from a mutable
   # "latest" URL, so any sha256 pinned here would go stale on their next

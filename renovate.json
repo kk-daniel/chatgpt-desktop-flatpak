@@ -16,6 +16,11 @@
       "description": "7-Zip",
       "groupName": "7zip",
       "matchPackageNames": ["7zip", "ip7z/7zip"]
+    },
+    {
+      "description": "bubblewrap. Grouped so the branch name ends with the group name, which is what post-renovate matches on to refresh the checksum.",
+      "groupName": "bubblewrap",
+      "matchPackageNames": ["bubblewrap", "containers/bubblewrap"]
     }
   ],
   "customManagers": [
@@ -46,6 +51,21 @@
       "datasourceTemplate": "github-releases",
       "versioningTemplate": "loose",
       "autoReplaceStringTemplate": "url: https://github.com/ip7z/7zip/releases/download/{{{newValue}}}/7z{{{replace '\\.' '' newValue}}}-linux-"
+    },
+    {
+      "customType": "regex",
+      "description": "bubblewrap release tarball. The version appears twice in the URL, so the whole URL is matched and rebuilt rather than patched in place.",
+      "managerFilePatterns": [
+        "/\\/com\\.openai\\.ChatGPT\\.yaml$/"
+      ],
+      "matchStrings": [
+        "url: https://github\\.com/containers/bubblewrap/releases/download/v(?<currentValue>[\\d.]+)/bubblewrap-[\\d.]+\\.tar\\.xz"
+      ],
+      "depNameTemplate": "bubblewrap",
+      "packageNameTemplate": "containers/bubblewrap",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$",
+      "autoReplaceStringTemplate": "url: https://github.com/containers/bubblewrap/releases/download/v{{{newValue}}}/bubblewrap-{{{newValue}}}.tar.xz"
     },
     {
       "customType": "regex",

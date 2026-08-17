@@ -68,6 +68,18 @@ if ! unshare --user --map-root-user true 2>/dev/null; then
   skip_all "this host cannot create user namespaces, so no broker can work"
 fi
 
+# The broker refuses to serve an app running as root, because bubblewrap then
+# hands the command its capabilities. So these tests cannot run as root either,
+# and that is a fact about the configuration rather than a missing dependency:
+# skipping would leave CI reporting green over a suite that measured nothing.
+if [ "$(id -u)" = 0 ]; then
+  echo "FAIL  these tests cannot run as root: the broker refuses a root app,"
+  echo "      because bubblewrap run as root keeps its capabilities for the"
+  echo "      command and would undo the read-only root Codex asked for."
+  echo "      Run them as an ordinary user with the flatpak installed for them."
+  exit 1
+fi
+
 SOCK=$XDG_RUNTIME_DIR/app/$APP/bwrap-broker.sock
 
 # Run bwrap inside the app. Everything below goes through this.

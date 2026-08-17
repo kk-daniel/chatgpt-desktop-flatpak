@@ -375,6 +375,32 @@ def same_namespace(fd, name):
     return (mine.st_dev, mine.st_ino) == (theirs.st_dev, theirs.st_ino)
 
 
+def refuse_root_app(uid):
+    """An app running as root cannot be served safely, so it is not served.
+
+    Every step of that configuration fights the design, and the last one is not
+    a matter of effort. Seeing euid 0, bubblewrap takes its privileged path: it
+    wants CAP_SYS_ADMIN to unshare its mount namespace and CAP_SETUID to write
+    its id maps, so with capabilities dropped it cannot build a sandbox at all.
+    Keeping them gets bubblewrap working -- and then it does not drop them for
+    the command either, measured as CapEff 000001ffffffffff on the command
+    itself. A command holding CAP_SYS_ADMIN can unshare its own mount namespace
+    and remount away the read-only root Codex asked for. That is a worse outcome
+    than refusing, and the alternative -- adding --cap-drop to the command line
+    -- would mean editing Codex's arguments, which is the one thing this design
+    does not do.
+
+    Flatpak applications are not meant to run as root, so this costs nothing
+    real. It is stated rather than left to fail confusingly three layers down.
+    """
+    if uid == 0:
+        raise Refused(
+            "the app runs as uid 0, which this broker will not serve: "
+            "bubblewrap treats root as privileged and would hand the command "
+            "its capabilities, defeating the sandbox Codex asked for. Run the "
+            "flatpak as an ordinary user")
+
+
 def namespace_fds(procfd):
     """Open every namespace descriptor before moving into any of them.
 
@@ -506,12 +532,13 @@ def become_unprivileged(uid, gid):
     --uid to the command line is what lets Codex's arguments reach bubblewrap
     exactly as written.
 
-    C is where the boundary actually is. Capabilities held in C are not
-    capabilities in A or on the host, and mounting in the app's own mount
-    namespace stays refused whatever we hold, because may_mount() asks for
-    CAP_SYS_ADMIN in the namespace that *owns* that mount namespace -- A --
-    and a process in C has none there. bubblewrap therefore has to unshare its
-    own mount namespace under C, which is exactly what it does.
+    C is what confines the command; the capability drop is defence in depth on
+    top of it, since capabilities held in C are not capabilities in A or on the
+    host. But it is not optional either, in both directions: at a non-zero uid
+    bubblewrap refuses to start with capabilities it did not expect, and at uid
+    0 -- see refuse_root_app() -- keeping them was measured to leave the command
+    itself holding CAP_SYS_ADMIN, which is why that configuration is refused
+    rather than accommodated.
     """
     outer = os.getuid()
     outer_gid = os.getgid()
@@ -527,23 +554,7 @@ def become_unprivileged(uid, gid):
     with open("/proc/self/gid_map", "w") as f:
         f.write(f"{gid} {outer_gid} 1\n")
 
-    if uid == 0:
-        # The app itself runs as root -- unusual, but it is what CI does, and
-        # bubblewrap then reads euid 0 as "privileged" and takes a path that
-        # needs CAP_SYS_ADMIN to unshare its mount namespace and CAP_SETUID to
-        # write its id maps. Dropping those leaves it unable to build a sandbox
-        # at all: first "Creating new namespace failed", then, once the
-        # namespace is asked for explicitly, "setting up uid map: Permission
-        # denied". Keeping them is sound for the reason in the docstring -- they
-        # are confined to C -- and bubblewrap drops privileges for the command
-        # regardless, which test-broker-live.sh asserts by reading CapEff.
-        libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
-    else:
-        # At any other uid bubblewrap knows it is unprivileged and needs none of
-        # this, so drop it. Defence in depth rather than the load-bearing
-        # control -- and not merely optional: bubblewrap refuses to start with
-        # capabilities it did not expect at a non-zero uid.
-        drop_all_capabilities()
+    drop_all_capabilities()
 
 
 def install_fds(received, wanted, preserve=None):
@@ -718,9 +729,11 @@ def serve(conn, app_id, bwrap_path):
         if name != app_id:
             raise Refused(f"caller is {name}, this broker serves {app_id}")
 
+        uid, gid = app_inside_ids(procfd)
+        refuse_root_app(uid)
+
         mnt, joinable = namespace_fds(procfd)
         opened = [mnt] + list(joinable.values())
-        uid, gid = app_inside_ids(procfd)
 
         data, fds = recv_with_fds(conn)
         request = parse_exec(data)
