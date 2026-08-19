@@ -289,7 +289,8 @@ mounted into the sandbox, and neither requires rebuilding the app.
 `com.visualstudio.code.tool` extension point, deliberately borrowing that ID
 prefix so the extensions already published on Flathub install here unmodified.
 Installing one is all there is to it — it unpacks to `/app/tools/<name>` and the
-launcher puts its `bin` on PATH:
+launcher puts its `bin` on PATH and its Python user-site directory, when present,
+on `PYTHONPATH`:
 
 ```bash
 flatpak install flathub com.visualstudio.code.tool.podman//25.08

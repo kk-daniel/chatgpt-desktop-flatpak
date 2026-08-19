@@ -118,11 +118,29 @@ export ELECTRON_FORCE_IS_PACKAGED=true
 export CHROME_DESKTOP=com.openai.ChatGPT.desktop
 export ELECTRON_OZONE_PLATFORM_HINT="${ELECTRON_OZONE_PLATFORM_HINT:-wayland}"
 
-# Tool extensions (com.visualstudio.code.tool.*) each unpack to
-# /app/tools/<name>/bin. Globbed rather than hardcoded so installing one is
-# all a user has to do to make it reachable from the app.
-for tool_bin in /app/tools/*/bin; do
+# Tool extensions (com.visualstudio.code.tool.*) each unpack under
+# /app/tools/<name>. Globbed rather than hardcoded so installing one is all a
+# user has to do to make its binaries and Python packages reachable.
+python_sitedir="$(python3 - <<'PY'
+import os
+import site
+
+print(os.path.relpath(site.getusersitepackages(), site.getuserbase()))
+PY
+)"
+for tool_dir in /app/tools/*; do
+  tool_bin="$tool_dir/bin"
   [ -d "$tool_bin" ] && PATH="$tool_bin:$PATH"
+
+  tool_pythondir="$tool_dir/$python_sitedir"
+  if [ -d "$tool_pythondir" ]; then
+    if [ -n "${PYTHONPATH:-}" ]; then
+      PYTHONPATH="$PYTHONPATH:$tool_pythondir"
+    else
+      PYTHONPATH="$tool_pythondir"
+    fi
+    export PYTHONPATH
+  fi
 done
 
 # Before the /app/bin prepend below, deliberately: an enable.sh is free to put
