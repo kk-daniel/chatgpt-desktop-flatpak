@@ -84,7 +84,7 @@ enable_sdk_extensions() {
 # namespace, so /tmp is simply there and Codex's default policy works. An
 # existing setting from an older install is harmless and is left alone.
 
-electron_args=()
+browser_args=()
 # No --password-store here on purpose. The app has no route to the Secret
 # Service -- see the manifest for why that grant is not given -- and forcing
 # gnome-libsecret with nothing to talk to makes safeStorage fail rather than
@@ -97,24 +97,14 @@ electron_args=()
 # back without editing this file.
 
 if [ -n "${WAYLAND_DISPLAY:-}" ] && [ "${ELECTRON_OZONE_PLATFORM_HINT:-wayland}" = "wayland" ]; then
-  electron_args+=("--enable-features=UseOzonePlatform,WaylandWindowDecorations" --enable-wayland-ime --wayland-text-input-version=3)
+  browser_args+=("--enable-features=UseOzonePlatform,WaylandWindowDecorations" --enable-wayland-ime --wayland-text-input-version=3)
 fi
 
 if [ -n "${XRDP_SESSION:-}" ]; then
-  electron_args+=(--disable-gpu --disable-software-rasterizer)
+  browser_args+=(--disable-gpu --disable-software-rasterizer)
 fi
 
 ensure_codex_dir
-
-# Populates /var/data/chatgpt, which /app/electron/{resources,assets}
-# symlink to.
-/app/bin/chatgpt-fetch || exit $?
-
-# Our Electron binary is literally named "electron", which is exactly the
-# name app.isPackaged uses to decide it is running from a dev checkout.
-# Left unset, the app picks its development state paths (codex-dev.vdb)
-# and skips packaged-only startup work.
-export ELECTRON_FORCE_IS_PACKAGED=true
 export CHROME_DESKTOP=com.openai.ChatGPT.desktop
 export ELECTRON_OZONE_PLATFORM_HINT="${ELECTRON_OZONE_PLATFORM_HINT:-wayland}"
 
@@ -156,4 +146,7 @@ export PATH
 log "PATH=$PATH"
 log "bwrap resolves to: $(command -v bwrap || echo '<none>')"
 
-exec /app/bin/zypak-wrapper.sh /app/electron/electron "${electron_args[@]}" "$@"
+# OpenAI's native package supplies the Owl app shell as well as the application
+# and its Linux native modules. Zypak integrates its Chromium sandbox with
+# Flatpak in the same way it does for Electron-based applications.
+exec /app/bin/zypak-wrapper.sh /app/extra/chatgpt/ChatGPT "${browser_args[@]}" "$@"

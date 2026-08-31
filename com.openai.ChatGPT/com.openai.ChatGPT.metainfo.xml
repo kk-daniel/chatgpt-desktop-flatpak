@@ -13,7 +13,8 @@
     </p>
     <p>
       This is an unofficial Flatpak package. The application itself is
-      downloaded from OpenAI when it is first launched.
+      downloaded from OpenAI's signed Linux repository when the Flatpak is
+      installed.
     </p>
   </description>
   <launchable type="desktop-id">com.openai.ChatGPT.desktop</launchable>
@@ -27,6 +28,7 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="26.825.51511-1" date="2026-08-31"/>
     <release version="26.825.5331.0" date="2026-08-30"/>
     <release version="26.825.4187.0" date="2026-08-29"/>
     <release version="26.820.10647.0" date="2026-08-28"/>

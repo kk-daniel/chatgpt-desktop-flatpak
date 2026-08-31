@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd /app/extra
+
+work_dir=/app/extra/.unpack
+trap 'rm -rf "$work_dir"' EXIT
+rm -rf "$work_dir"
+mkdir -p "$work_dir/chatgpt"
+
+rpm=""
+for candidate in chatgpt-x86_64.rpm chatgpt-aarch64.rpm; do
+  if [ -f "$candidate" ]; then
+    rpm="$candidate"
+    break
+  fi
+done
+
+if [ -z "$rpm" ]; then
+  echo "ChatGPT RPM not found in /app/extra" >&2
+  exit 1
+fi
+
+# 7-Zip unwraps the RPM and its xz-compressed payload and writes the resulting
+# newc CPIO stream to stdout. The small Python extractor consumes it directly,
+# so installation never needs a second 1.4 GB staging copy of the payload.
+7z x -y "$rpm" -so | extract-chatgpt-rpm.py "$work_dir/chatgpt"
+
+payload="$work_dir/chatgpt"
+resources="$payload/resources"
+
+is_elf() {
+  [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]
+}
+
+for file in \
+  "$payload/ChatGPT" \
+  "$resources/codex" \
+  "$resources/codex-code-mode-host" \
+  "$resources/rg" \
+  "$resources/app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+  "$resources/app.asar.unpacked/node_modules/node-pty/build/Release/pty.node"
+do
+  if [ ! -f "$file" ] || ! is_elf "$file"; then
+    echo "Required Linux ELF is missing from $rpm: ${file#"$payload/"}" >&2
+    exit 1
+  fi
+done
+
+if [ ! -f "$resources/app.asar" ] || [ ! -f "$payload/owl-shell-runtime.json" ]; then
+  echo "Owl application payload is incomplete in $rpm" >&2
+  exit 1
+fi
+
+# 7-Zip preserves the execute bits from CPIO but applies the install umask to
+# all permissions. Restore world readability/traversability without turning
+# data files into executables, then assert the entry points explicitly.
+chmod -R a+rX "$payload"
+chmod a+rx "$payload/ChatGPT" "$payload/browser_crashpad_handler" \
+  "$resources/codex" "$resources/codex-code-mode-host" "$resources/rg"
+
+# Zypak provides Chromium's sandbox inside Flatpak. A packaged setuid helper
+# would be unusable here and Chromium aborts if it finds one without setuid.
+rm -f "$payload/chrome-sandbox"
+
+rm -rf chatgpt
+mv "$payload" chatgpt
+rm -f chatgpt-x86_64.rpm chatgpt-aarch64.rpm
+
+echo "ChatGPT RPM extra data installed"

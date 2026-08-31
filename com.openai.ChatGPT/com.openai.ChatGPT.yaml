@@ -1,7 +1,6 @@
 app-id: com.openai.ChatGPT
-# Sdk rather than Platform as the runtime: the payload is fetched and
-# unpacked at first launch, which needs curl and zenity present at run
-# time, not just at build time.
+# Codex runs developer tools and SDK extensions inside the sandbox, so use the
+# SDK as the runtime rather than limiting the app to the Platform surface.
 runtime: org.freedesktop.Sdk
 runtime-version: "25.08"
 sdk: org.freedesktop.Sdk
@@ -13,9 +12,6 @@ separate-locales: false
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.node24
 add-extensions:
-  # Mount point for tool extensions such as com.visualstudio.code.tool.podman.
-  # Not downloaded unless the user installs one; chatgpt.sh puts whatever
-  # lands here on PATH.
   com.visualstudio.code.tool:
     directory: tools
     subdirectories: true
@@ -23,9 +19,6 @@ add-extensions:
     add-ld-path: lib
     no-autodownload: true
     autodelete: false
-  # Node at *run* time, not just for node-gyp at build time: Codex runs MCP
-  # servers, which are usually npm packages launched with node/npx from
-  # ~/.codex/config.toml. Auto-downloaded, so they work out of the box.
   org.freedesktop.Sdk.Extension.node24:
     directory: lib/sdk/node24
     version: '25.08'
@@ -44,45 +37,16 @@ finish-args:
   - --device=dri
   - --env=XCURSOR_PATH=/run/host/user-share/icons:/run/host/share/icons
   - --env=ELECTRON_OZONE_PLATFORM_HINT=wayland
-  # Sandbox-private ~/.codex for config.toml, skills, plugins and the
-  # session SQLite databases. Mapped at $HOME/.codex inside the sandbox,
-  # stored at ~/.var/app/com.openai.ChatGPT/.codex on the host -- not
-  # shared with a host-installed codex CLI. No access to the real home
-  # directory is granted; files reach the app through the file-chooser
-  # portal instead.
+  # Sandbox-private ~/.codex for config.toml, skills, plugins and the session
+  # databases. It is not shared with a host-installed Codex CLI.
   - --persist=.codex
-  # Deliberately absent: --talk-name=org.freedesktop.secrets.
-  #
-  # Electron safeStorage would keep the session token in the login keyring
-  # through libsecret, and that grant is what makes it reachable. But the
-  # Secret Service specification does not require per-application isolation,
-  # and gnome-keyring and KWallet do not provide it: an app that can talk to
-  # the service can read every unlocked secret belonging to every other
-  # application. That is a large amount of access to hold in exchange for not
-  # re-entering one login.
-  #
-  # Without it Chromium's backend detection finds no usable keyring and falls
-  # back to encrypting the token with a built-in key inside the app's own data
-  # directory -- no worse, in practice, than a file in your home directory,
-  # since that is where it already was. --password-store is not forced in the
-  # launcher either, because forcing gnome-libsecret with no route to the
-  # service makes safeStorage fail instead of fall back.
-  #
-  # README.md documents the override for anyone who would rather have the
-  # keyring than the isolation. It is one command, and it is their call.
+  # Deliberately absent: --talk-name=org.freedesktop.secrets. Secret Service
+  # has no per-application isolation; README documents the optional override.
   - --talk-name=org.freedesktop.Notifications
-  # Notification-area / tray (StatusNotifierItem on KDE & GNOME-via-extension,
-  # AppIndicator on Ubuntu/Cinnamon). Without these the SNI registration
-  # silently fails under Flatpak and no icon appears. Modern Electron
-  # registers the item by object path on its existing bus connection, so
-  # we don't need to --own-name the per-PID SNI bus name.
   - --talk-name=org.kde.StatusNotifierWatcher
   - --talk-name=com.canonical.AppMenu.Registrar
   - --talk-name=com.canonical.AppMenu.Registrar.*
   - --talk-name=com.canonical.indicator.application
-  # libappindicator claims a per-PID bus name under
-  # com.canonical.indicator.application; without ownership, the
-  # registration call to the watcher silently no-ops.
   - --own-name=com.canonical.indicator.application.*
 cleanup:
   - /include
@@ -90,6 +54,9 @@ cleanup:
   - /share/gtk-doc
   - '*.la'
 modules:
+  # apply_extra needs to unwrap the RPM and its xz-compressed CPIO payload at
+  # install time. The extractor consumes the CPIO as a stream, so no full-size
+  # intermediate copy is written.
   - name: 7zip
     buildsystem: simple
     build-commands:
@@ -107,207 +74,12 @@ modules:
         sha256: 70ea6cc737ae1495ea2d7eb20ef3120fe579bd3f1a83a9d2362b62ec5bde2bba
         strip-components: 0
 
-  - name: electron
-    buildsystem: simple
-    build-commands:
-      - mkdir -p /app/electron
-      - cp -a . /app/electron/
-      - chmod +x /app/electron/electron /app/electron/chrome_crashpad_handler
-      # Drop the suid sandbox helper: zypak provides namespace sandboxing
-      # via CHROME_DEVEL_SANDBOX, and Chromium aborts if it sees a
-      # non-setuid chrome-sandbox sitting next to the binary.
-      - rm -f /app/electron/chrome-sandbox
-      # Electron would otherwise boot its built-in "no app loaded" window.
-      - rm -f /app/electron/resources/default_app.asar
-      # Electron resolves the app at <exe_dir>/resources/app.asar AND reads
-      # auxiliary files (the bundled Linux codex CLI, ripgrep, tray icons,
-      # plugins) from process.resourcesPath i.e. <exe_dir>/resources.
-      # Passing an app path on the command line is not an option: that is
-      # handled by default_app.asar, which Electron skips once the app
-      # looks packaged -- and it has to look packaged, or the app picks its
-      # development state paths. So resources must genuinely sit next to
-      # the binary.
-      #
-      # /app is read-only at run time, so point it at /var/data, which is
-      # the app's own writable data directory and, unlike $XDG_DATA_HOME,
-      # has the same absolute path in every sandbox -- so the link can be
-      # made now and resolved after chatgpt-fetch populates it.
-      - rm -rf /app/electron/resources
-      - ln -s /var/data/chatgpt/resources /app/electron/resources
-      - ln -s /var/data/chatgpt/assets /app/electron/assets
-    sources:
-      # Must stay in step with the Electron the upstream app is built
-      # against (package.json devDependencies.electron). Native modules
-      # below are compiled against this exact version's headers.
-      - type: archive
-        only-arches: [x86_64]
-        url: https://github.com/electron/electron/releases/download/v42.3.0/electron-v42.3.0-linux-x64.zip
-        sha256: 487a667ca6a734b958c16cff1df74d9d44d2c18a6cccdb4dd51f6301a356c420
-        # Electron zips have no top-level directory, so the default
-        # strip-components: 1 flattens locales/ and resources/ into the root.
-        strip-components: 0
-      - type: archive
-        only-arches: [aarch64]
-        url: https://github.com/electron/electron/releases/download/v42.3.0/electron-v42.3.0-linux-arm64.zip
-        sha256: 2a375ff973fb7bddc538a4f67b2141947e9d72513a1baa2beabec2a7f65cd0f0
-        strip-components: 0
-
-  # The MSIX ships better-sqlite3 and node-pty as Windows DLLs. Without
-  # Linux builds the app comes up but every session store fails ("SQLite
-  # database is inaccessible") and the terminal never spawns. Compile both
-  # against the Electron headers pinned above; --nodedir keeps node-gyp
-  # entirely offline, which flatpak-builder requires.
-  #
-  # better-sqlite3 is 12.11.1, not the 12.9.0 the MSIX declares: 12.9.0
-  # predates the V8 API change in Electron 42 (External::Value() gained an
-  # Isolate* parameter) and does not compile. The lib/*.js of 12.9.0 and
-  # 12.11.1 are byte-identical, so only the compiled binary is swapped in
-  # and the JavaScript the app loads is untouched.
-  #
-  # @parcel/watcher is a different case: not a Windows build to replace but
-  # a package the MSIX does not contain at all. The app's file watcher does
-  # `await import("@parcel/watcher")` with a hardcoded `backend: "inotify"`,
-  # so that branch is Linux-only and a Windows package has no reason to
-  # carry it. Left missing, every repo watch dies with ERR_MODULE_NOT_FOUND
-  # and the app never notices changes on disk. Installed whole rather than
-  # swapped in, and reached through node_modules resolution -- see
-  # link_node_modules in chatgpt-fetch.
-  - name: native-modules
-    buildsystem: simple
-    build-options:
-      env:
-        npm_config_nodedir: /run/build/native-modules/headers
-    build-commands:
-      # --force_build=1 is required for better-sqlite3: without it the
-      # binding.gyp short-circuits to a prebuilt binary and emits only
-      # stamp files, leaving no .node behind.
-      - nodegyp=/usr/lib/sdk/node24/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js;
-        arch=$(uname -m | sed -e 's/x86_64/x64/' -e 's/aarch64/arm64/');
-        headers=/run/build/native-modules/headers;
-        (cd better-sqlite3 && node "$nodegyp" rebuild --release --force_build=1
-        --arch="$arch" --nodedir="$headers") &&
-        (cd node-pty && node "$nodegyp" rebuild --release
-        --arch="$arch" --nodedir="$headers") &&
-        (cd parcel-watcher && node "$nodegyp" rebuild --release
-        --arch="$arch" --nodedir="$headers")
-      - install -Dm644 better-sqlite3/build/Release/better_sqlite3.node
-        /app/share/chatgpt/native/better_sqlite3.node
-      - install -Dm644 node-pty/build/Release/pty.node
-        /app/share/chatgpt/native/pty.node
-      # index.js finds this on its own: the require of the prebuilt
-      # @parcel/watcher-linux-$arch-glibc package misses, which it treats as
-      # non-fatal, and falls through to ./build/Release/watcher.node. src/
-      # and the rest of the build tree are build-time only.
-      - install -Dm755 parcel-watcher/build/Release/watcher.node
-        /app/share/chatgpt/node_modules/@parcel/watcher/build/Release/watcher.node
-      - install -Dm644 -t /app/share/chatgpt/node_modules/@parcel/watcher
-        parcel-watcher/index.js parcel-watcher/wrapper.js
-        parcel-watcher/package.json parcel-watcher/LICENSE
-      # Siblings, not nested: resolution from @parcel/watcher/index.js skips
-      # the node_modules it already sits in and lands on this directory.
-      - for dep in detect-libc picomatch is-glob is-extglob; do
-        mkdir -p "/app/share/chatgpt/node_modules/$dep" &&
-        cp -a "$dep/." "/app/share/chatgpt/node_modules/$dep/" || exit 1;
-        done
-    sources:
-      - type: archive
-        url: https://artifacts.electronjs.org/headers/dist/v42.3.0/node-v42.3.0-headers.tar.gz
-        sha256: 821009f9c1830050d894aef9e61906cb0a537b2000b2d9bbed9985fff1d5e0d0
-        dest: headers
-      - type: archive
-        url: https://registry.npmjs.org/better-sqlite3/-/better-sqlite3-12.11.1.tgz
-        sha256: ebf0ed75a7a59dbcb3b24bbd014ef49d9f15bc328e4adcbf516f2a8fadfa2835
-        dest: better-sqlite3
-      - type: archive
-        url: https://registry.npmjs.org/node-pty/-/node-pty-1.1.0.tgz
-        sha256: c7517f19083ddcb05f276904680eb2b11a6b5ecab778b8e4e5685a6d645b3f60
-        dest: node-pty
-      # node-pty's binding.gyp resolves its include path through
-      # require('node-addon-api'), so the package has to sit in node-pty's
-      # own node_modules at configure time.
-      - type: archive
-        url: https://registry.npmjs.org/node-addon-api/-/node-addon-api-8.9.0.tgz
-        sha256: 19b87e2ce3a77fec0121ac97d7db088aae28aacfff481adab50d5f61b70e68f4
-        dest: node-pty/node_modules/node-addon-api
-      - type: archive
-        url: https://registry.npmjs.org/@parcel/watcher/-/watcher-2.6.0.tgz
-        sha256: ab42807be3df24a12d01e31568a7e61def1a4bee636a7c60a397319eff677e95
-        dest: parcel-watcher
-      # Same binding.gyp trick as node-pty, but 7.x: @parcel/watcher declares
-      # node-addon-api ^7.0.0, so it does not get the 8.9.0 above.
-      - type: archive
-        url: https://registry.npmjs.org/node-addon-api/-/node-addon-api-7.1.1.tgz
-        sha256: b10455d15a977c0cd17a1cb0eb679e03d939f8ef8d4302eb33e1f78dacc71f82
-        dest: parcel-watcher/node_modules/node-addon-api
-      # Run-time dependencies of @parcel/watcher: index.js requires
-      # detect-libc, wrapper.js requires picomatch and is-glob, and is-glob
-      # requires is-extglob. Nothing here is compiled.
-      - type: archive
-        url: https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz
-        sha256: 270dec0fc06cff86481da8af2dd8f18dee6b602790b14ef0e1c2c18d7da39427
-        dest: detect-libc
-      - type: archive
-        url: https://registry.npmjs.org/picomatch/-/picomatch-4.0.5.tgz
-        sha256: e89c478225a42b3793bb4a39fd576de142c9829c26a5bd71782249e48b112f51
-        dest: picomatch
-      - type: archive
-        url: https://registry.npmjs.org/is-glob/-/is-glob-4.0.3.tgz
-        sha256: 3fe453fb193bb58f6f0505dfb1151230935380b5b55e1f9864261c2aafc1bec6
-        dest: is-glob
-      - type: archive
-        url: https://registry.npmjs.org/is-extglob/-/is-extglob-2.1.1.tgz
-        sha256: 8c5d4286146ad62fc1096981700ce1c22a167708926fca01f9ca74f9bb50bc19
-        dest: is-extglob
-
-  # Verifies the MSIX signature before chatgpt-fetch unpacks anything.
-  # Nothing else on Linux computes the Appx digests, which is what binds a
-  # signature to the bytes rather than to a claim inside them.
-  #
-  # Patched, because it cannot verify a Microsoft Store package as it
-  # ships: Store leaf certificates carry a critical Application Policies
-  # extension OpenSSL does not parse, so the chain is rejected before the
-  # digests are ever compared. The patch tolerates that one extension and
-  # only when nothing else on the certificate is unparsed.
-  #
-  # Pinned to a release rather than tracking master: this is the one
-  # component whose behaviour a silent change could turn into an
-  # authenticity check that passes when it should not.
-  - name: osslsigncode
-    buildsystem: cmake-ninja
-    config-opts:
-      - -DCMAKE_BUILD_TYPE=Release
-      - -DENABLE_TESTS=OFF
-    sources:
-      - type: archive
-        url: https://github.com/mtrojnar/osslsigncode/archive/refs/tags/2.14.tar.gz
-        sha256: 0f033fd6069387d2e489fbd2187e62f624764eb8c2758ee94e3e793e5150b5c5
-      - type: patch
-        path: osslsigncode-ms-app-policies.patch
-
-  # The real bubblewrap, built against this runtime, because the broker needs a
-  # binary it can exec *inside* this sandbox's mount namespace.
-  #
-  # Built rather than taken from the ChatGPT payload even where the payload has
-  # one, and the reason is not the version. The payload unpacks into /var/data,
-  # which is ~/.var/app/<id>/data and therefore writable by the app -- so the
-  # broker would be exec'ing a binary its own caller can replace, while holding
-  # capabilities in namespace C. And the payload's contents are upstream's
-  # choice: a rename would break every sandboxed command on the user's machine
-  # after an auto-update, where a pinned tarball breaks the build instead.
-  # Renovate tracks it, and post-renovate refreshes the digest, so this is not
-  # hand-maintained.
-  #
-  # Installed to /app/libexec rather than /app/bin on purpose: /app/bin/bwrap
-  # is the client Codex must find on PATH, and this must not be reachable that
-  # way. It is inert here in any case -- run from inside the sandbox it fails
-  # exactly like Codex's own copy, because flatpak's seccomp filter denies the
-  # namespace syscalls. Only the broker, standing outside that filter, can use
-  # it.
+  # The broker executes this copy inside the Flatpak's mount namespace. It is
+  # pinned independently of the writable upstream payload so the app cannot
+  # replace the binary the privileged side of the broker runs.
   - name: bubblewrap
     buildsystem: meson
     config-opts:
-      # bwrapdir puts it straight where it belongs; there is no /app/bin stage
-      # it could be picked up from by accident.
       - -Dbwrapdir=/app/libexec/flatpak-bwrap-broker
       - -Dman=disabled
       - -Dtests=false
@@ -318,52 +90,50 @@ modules:
         url: https://github.com/containers/bubblewrap/releases/download/v0.12.0/bubblewrap-0.12.0.tar.xz
         sha256: 9760d007363e3abba7c747489910f9f82d9fca53ba3bd3282e396fa3c97a3314
 
-  # No extra-data source: OpenAI serves the package only from a mutable
-  # "latest" URL, so any sha256 pinned here would go stale on their next
-  # release and break every fresh install until re-pinned. chatgpt-fetch
-  # pulls it on first launch instead, and verifies its signature rather
-  # than a digest -- authenticity survives the version churn a pinned hash
-  # cannot. expected-version records the build this packaging was tested
-  # against, and is what chatgpt-fetch compares the installed payload
-  # against to decide whether to warn or refresh.
   - name: chatgpt
     buildsystem: simple
     build-commands:
       - install -Dm755 chatgpt.sh /app/bin/chatgpt
-      - install -Dm755 chatgpt-fetch.sh /app/bin/chatgpt-fetch
-      # Installed as `bwrap` so Codex finds it on PATH ahead of its own
-      # copy. Flatpak denies the namespace syscalls bubblewrap needs, so
-      # this hands the request to the host broker, which runs the real
-      # bubblewrap from /app/libexec inside this sandbox's own namespaces.
-      # Nothing is translated on the way; see host/ and SANDBOXING.md.
+      - install -Dm755 apply_extra /app/bin/apply_extra
+      - install -Dm755 extract-chatgpt-rpm.py /app/bin/extract-chatgpt-rpm.py
+      # Codex finds this as `bwrap` before its own bundled copy. The host broker
+      # runs the real bubblewrap above inside this sandbox's namespaces.
       - install -Dm755 bwrap-client.py /app/bin/bwrap
-      - install -Dm644 expected-version /app/share/chatgpt/expected-version
-      - install -Dm644 microsoft-roots.pem /app/share/chatgpt/microsoft-roots.pem
       - install -Dm644 ${FLATPAK_ID}.metainfo.xml -t /app/share/metainfo
       - install -Dm644 ${FLATPAK_ID}.desktop -t /app/share/applications
       - install -Dm644 ${FLATPAK_ID}-url-handler.desktop -t /app/share/applications
       - install -Dm644 ${FLATPAK_ID}.png /app/share/icons/hicolor/256x256/apps/${FLATPAK_ID}.png
-      # Mount points for the add-extensions above. Flatpak refuses to
-      # install an extension whose directory does not exist in the build.
+      - mkdir -p /app/extra/chatgpt
       - mkdir -p /app/lib/sdk/node24
       - mkdir -p /app/tools
-      # Put the node24 extension on PATH under its usual names, so an MCP
-      # server configured as `npx -y some-server` resolves.
       - ln -s /app/lib/sdk/node24/bin/node /app/bin/node
       - ln -s /app/lib/sdk/node24/bin/npm /app/bin/npm
       - ln -s /app/lib/sdk/node24/bin/npx /app/bin/npx
       - ln -s /app/lib/sdk/node24/bin/corepack /app/bin/corepack
     sources:
+      # Official native Linux builds from OpenAI's signed RPM-MD repository.
+      # The URLs are immutable; update-rpm-metadata.py verifies repomd.xml.asc,
+      # follows its hash chain, and refreshes these checksums and sizes.
+      - type: extra-data
+        filename: chatgpt-x86_64.rpm
+        only-arches: [x86_64]
+        url: https://persistent.oaistatic.com/codex-app-prod/linux/rpm/x86_64/chatgpt-26.825.51511-1.x86_64.rpm
+        sha256: 44e19ee796d788bffd741acb86a87be2f295d74fc4847132e7482bf04972c58d
+        size: 458831841
+      - type: extra-data
+        filename: chatgpt-aarch64.rpm
+        only-arches: [aarch64]
+        url: https://persistent.oaistatic.com/codex-app-prod/linux/rpm/aarch64/chatgpt-26.825.51511-1.aarch64.rpm
+        sha256: 45f225f9cd6b3b6bbfda8c3555fcdc03d9cae0421c2323a9b7f2db61bbb7c4f9
+        size: 433897053
+      - type: file
+        path: apply_extra
+      - type: file
+        path: extract-chatgpt-rpm.py
       - type: file
         path: chatgpt.sh
       - type: file
-        path: chatgpt-fetch.sh
-      - type: file
         path: bwrap-client.py
-      - type: file
-        path: expected-version
-      - type: file
-        path: microsoft-roots.pem
       - type: file
         path: com.openai.ChatGPT.metainfo.xml
       - type: file

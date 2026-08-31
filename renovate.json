@@ -9,7 +9,7 @@
     {
       "description": "ChatGPT Desktop",
       "groupName": "chatgpt",
-      "matchPackageNames": ["chatgpt-desktop"],
+      "matchPackageNames": ["chatgpt"],
       "automerge": true
     },
     {
@@ -26,16 +26,35 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "ChatGPT Desktop build, recorded bare in expected-version",
+      "description": "ChatGPT x86_64 RPM from OpenAI's RPM-MD repository",
       "managerFilePatterns": [
-        "/\\/expected-version$/"
+        "/\\/com\\.openai\\.ChatGPT\\.yaml$/"
       ],
       "matchStrings": [
-        "(?<currentValue>\\d+(?:\\.\\d+)+)"
+        "url: https://persistent\\.oaistatic\\.com/codex-app-prod/linux/rpm/x86_64/chatgpt-(?<currentValue>[\\d.]+-\\d+)\\.x86_64\\.rpm"
       ],
-      "depNameTemplate": "chatgpt-desktop",
-      "datasourceTemplate": "custom.chatgpt-desktop",
-      "versioningTemplate": "loose"
+      "depNameTemplate": "chatgpt",
+      "packageNameTemplate": "chatgpt",
+      "datasourceTemplate": "rpm",
+      "registryUrlTemplate": "https://persistent.oaistatic.com/codex-app-prod/linux/rpm/x86_64/repodata/",
+      "versioningTemplate": "loose",
+      "autoReplaceStringTemplate": "url: https://persistent.oaistatic.com/codex-app-prod/linux/rpm/x86_64/chatgpt-{{{newValue}}}.x86_64.rpm"
+    },
+    {
+      "customType": "regex",
+      "description": "ChatGPT aarch64 RPM, resolved independently so Renovate cannot select a version absent from that architecture",
+      "managerFilePatterns": [
+        "/\\/com\\.openai\\.ChatGPT\\.yaml$/"
+      ],
+      "matchStrings": [
+        "url: https://persistent\\.oaistatic\\.com/codex-app-prod/linux/rpm/aarch64/chatgpt-(?<currentValue>[\\d.]+-\\d+)\\.aarch64\\.rpm"
+      ],
+      "depNameTemplate": "chatgpt",
+      "packageNameTemplate": "chatgpt",
+      "datasourceTemplate": "rpm",
+      "registryUrlTemplate": "https://persistent.oaistatic.com/codex-app-prod/linux/rpm/aarch64/repodata/",
+      "versioningTemplate": "loose",
+      "autoReplaceStringTemplate": "url: https://persistent.oaistatic.com/codex-app-prod/linux/rpm/aarch64/chatgpt-{{{newValue}}}.aarch64.rpm"
     },
     {
       "customType": "regex",
@@ -85,13 +104,6 @@
     }
   ],
   "customDatasources": {
-    "chatgpt-desktop": {
-      "defaultRegistryUrlTemplate": "https://raw.githubusercontent.com/kk-daniel/chatgpt-desktop-flatpak/version-oracle/chatgpt-version.json",
-      "format": "json",
-      "transformTemplates": [
-        "{ \"releases\": [{ \"version\": version }] }"
-      ]
-    },
     "flathub-runtime": {
       "defaultRegistryUrlTemplate": "https://flathub.org/api/v2/runtimes",
       "format": "json",

@@ -4,12 +4,13 @@ set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
 metainfo="com.openai.ChatGPT.metainfo.xml"
+manifest="com.openai.ChatGPT.yaml"
 
-version="$(cat expected-version 2>/dev/null || echo "")"
+versions="$(sed -n 's#.*linux/rpm/x86_64/chatgpt-\([0-9][0-9.]*-[0-9][0-9]*\)\.x86_64\.rpm.*#\1#p' "$manifest")"
+version="$(printf '%s\n' "$versions" | head -n 1)"
 
-if [ -z "$version" ]; then
-  echo "Error: expected-version is missing or empty" >&2
-  echo "Run update-expected-version.sh first." >&2
+if [ -z "$version" ] || [ "$(printf '%s\n' "$versions" | grep -c .)" -ne 1 ]; then
+  echo "Error: expected exactly one x86_64 ChatGPT RPM URL in $manifest" >&2
   exit 1
 fi
 
