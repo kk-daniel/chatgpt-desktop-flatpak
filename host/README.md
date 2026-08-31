@@ -1,11 +1,12 @@
 # flatpak-bwrap-broker
 
 Runs bubblewrap on behalf of a confined flatpak, inside that flatpak's own
-namespaces. Packaged separately from the flatpak on purpose: the flatpak cannot
-install or update a host service, and should not be able to.
+namespaces. The matching files ship with the Flatpak, but the service is
+installed separately on purpose: the Flatpak cannot install or update a host
+service, and should not be able to.
 
 ```bash
-bash host/install.sh com.openai.ChatGPT
+"$(flatpak info com.openai.ChatGPT -l)/files/extra/chatgpt/sandbox-host/install.sh"
 ```
 
 Installs into `~/.local/libexec/flatpak-bwrap-broker` and
@@ -39,11 +40,11 @@ else rather than letting commands die of SIGSYS. The manifest does carry aarch64
 sources; on such a build the sandbox will not work until a second syscall table
 is added and checked with `host/test-seccomp-parity.sh` **on that architecture**.
 
-**Re-run `install.sh` after every change to the broker.** A flatpak update
-replaces the client inside the app but cannot touch a host service, so the two
-drift apart. They will not fail silently — the protocol carries a version and a
-mismatch is refused with a message naming both sides — but nothing updates the
-broker for you.
+**Re-run the packaged `install.sh` after every Flatpak update.** An update
+replaces the client and the installer inside the app but cannot touch the copy
+already installed as a host service, so the two can drift apart. They will not
+fail silently — the protocol carries a version and a mismatch is refused with a
+message naming both sides — but nothing updates the host copy for you.
 
 ## Why it exists
 

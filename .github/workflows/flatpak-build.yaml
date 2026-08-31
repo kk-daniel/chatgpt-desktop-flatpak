@@ -234,6 +234,20 @@ jobs:
           [ -x "$loc/files/bin/bwrap" ] \
             || { echo "ERROR: bwrap shim missing or not executable" >&2; fail=1; }
 
+          sandbox_host="$payload/sandbox-host"
+          for f in install.sh flatpak-bwrap-broker; do
+            [ -x "$sandbox_host/$f" ] \
+              || { echo "ERROR: sandbox host executable missing: $f" >&2; fail=1; }
+            cmp -s "$sandbox_host/$f" "host/$f" \
+              || { echo "ERROR: packaged sandbox host file differs: $f" >&2; fail=1; }
+          done
+          for f in seccomp_policy.py flatpak-bwrap-broker@.service flatpak-bwrap-broker@.socket; do
+            [ -f "$sandbox_host/$f" ] \
+              || { echo "ERROR: sandbox host file missing: $f" >&2; fail=1; }
+            cmp -s "$sandbox_host/$f" "host/$f" \
+              || { echo "ERROR: packaged sandbox host file differs: $f" >&2; fail=1; }
+          done
+
           [ "$fail" -eq 0 ] && echo "Build output looks sane"
           exit "$fail"
 

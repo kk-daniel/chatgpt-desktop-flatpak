@@ -106,7 +106,7 @@ Expect to sign in again after switching storage backends.
 > Codex's bubblewrap sandbox needs a small, separately installed host service.
 
 ```sh
-bash host/install.sh com.openai.ChatGPT
+"$(flatpak info com.openai.ChatGPT -l)/files/extra/chatgpt/sandbox-host/install.sh"
 ```
 
 Flatpak unconditionally blocks the namespace syscalls nested bubblewrap needs.

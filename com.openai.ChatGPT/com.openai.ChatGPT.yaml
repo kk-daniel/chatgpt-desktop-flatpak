@@ -99,6 +99,15 @@ modules:
       # Codex finds this as `bwrap` before its own bundled copy. The host broker
       # runs the real bubblewrap above inside this sandbox's namespaces.
       - install -Dm755 bwrap-client.py /app/bin/bwrap
+      # A Flatpak cannot install a host systemd service, but it can carry the
+      # matching installer. apply_extra copies this directory next to the
+      # native payload so the host can install exactly the broker version that
+      # belongs to the installed Flatpak without a repository checkout.
+      - install -Dm755 sandbox-host-install.sh /app/share/chatgpt/sandbox-host/install.sh
+      - install -Dm755 sandbox-host-broker /app/share/chatgpt/sandbox-host/flatpak-bwrap-broker
+      - install -Dm644 sandbox-host-seccomp-policy.py /app/share/chatgpt/sandbox-host/seccomp_policy.py
+      - install -Dm644 sandbox-host.service /app/share/chatgpt/sandbox-host/flatpak-bwrap-broker@.service
+      - install -Dm644 sandbox-host.socket /app/share/chatgpt/sandbox-host/flatpak-bwrap-broker@.socket
       - install -Dm644 ${FLATPAK_ID}.metainfo.xml -t /app/share/metainfo
       - install -Dm644 ${FLATPAK_ID}.desktop -t /app/share/applications
       - install -Dm644 ${FLATPAK_ID}-url-handler.desktop -t /app/share/applications
@@ -134,6 +143,21 @@ modules:
         path: chatgpt.sh
       - type: file
         path: bwrap-client.py
+      - type: file
+        path: ../host/install.sh
+        dest-filename: sandbox-host-install.sh
+      - type: file
+        path: ../host/flatpak-bwrap-broker
+        dest-filename: sandbox-host-broker
+      - type: file
+        path: ../host/seccomp_policy.py
+        dest-filename: sandbox-host-seccomp-policy.py
+      - type: file
+        path: ../host/flatpak-bwrap-broker@.service
+        dest-filename: sandbox-host.service
+      - type: file
+        path: ../host/flatpak-bwrap-broker@.socket
+        dest-filename: sandbox-host.socket
       - type: file
         path: com.openai.ChatGPT.metainfo.xml
       - type: file

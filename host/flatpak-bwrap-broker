@@ -259,13 +259,13 @@ def parse_exec(data):
     version = r.u8()
     if version != PROTOCOL_VERSION:
         # Fail closed and name both sides. The client lives in the flatpak and
-        # the broker was installed by hand, so this is the expected shape of a
-        # half-finished update rather than an exotic case.
+        # the broker was installed separately, so this is the expected shape of
+        # a half-finished update rather than an exotic case.
         raise Refused(
             f"protocol mismatch: the client speaks version {version}, this "
-            f"broker speaks {PROTOCOL_VERSION}. Re-run host/install.sh from a "
-            f"checkout matching the installed flatpak -- a flatpak update does "
-            f"not update the broker")
+            f"broker speaks {PROTOCOL_VERSION}. Re-run sandbox-host/install.sh "
+            f"from the installed flatpak -- a flatpak update does not update "
+            f"the host broker")
     kind = r.u8()
     if kind != MSG_EXEC:
         raise Refused(f"expected an exec message, got type {kind}")

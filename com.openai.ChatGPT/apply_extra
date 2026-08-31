@@ -52,12 +52,31 @@ if [ ! -f "$resources/app.asar" ] || [ ! -f "$payload/owl-shell-runtime.json" ];
   exit 1
 fi
 
+# The host half cannot be installed from inside Flatpak, so carry the matching
+# installer beside the payload where it is directly reachable from the host's
+# immutable deployment path. These files come from this Flatpak build, not the
+# downloaded RPM.
+host_source=/app/share/chatgpt/sandbox-host
+host_target="$payload/sandbox-host"
+for file in install.sh flatpak-bwrap-broker seccomp_policy.py \
+  flatpak-bwrap-broker@.service flatpak-bwrap-broker@.socket
+do
+  if [ ! -f "$host_source/$file" ]; then
+    echo "Sandbox host installer is incomplete: $file is missing" >&2
+    exit 1
+  fi
+done
+rm -rf "$host_target"
+mkdir -p "$host_target"
+cp -a "$host_source/." "$host_target/"
+
 # 7-Zip preserves the execute bits from CPIO but applies the install umask to
 # all permissions. Restore world readability/traversability without turning
 # data files into executables, then assert the entry points explicitly.
 chmod -R a+rX "$payload"
 chmod a+rx "$payload/ChatGPT" "$payload/browser_crashpad_handler" \
-  "$resources/codex" "$resources/codex-code-mode-host" "$resources/rg"
+  "$resources/codex" "$resources/codex-code-mode-host" "$resources/rg" \
+  "$host_target/install.sh" "$host_target/flatpak-bwrap-broker"
 
 # Zypak provides Chromium's sandbox inside Flatpak. A packaged setuid helper
 # would be unusable here and Chromium aborts if it finds one without setuid.
