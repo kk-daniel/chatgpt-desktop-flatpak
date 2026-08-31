@@ -53,8 +53,8 @@ echo "protocol version: $(python3 -c "
 import re
 src = open('$LIBEXEC/flatpak-bwrap-broker').read()
 print(re.search(r'PROTOCOL_VERSION = (\d+)', src).group(1))" 2>/dev/null || echo unknown)"
-echo "Re-run this script after every change to the broker: a flatpak update"
-echo "replaces the client inside the app but cannot touch a host service."
+echo "Re-run this installed Flatpak's sandbox-host/install.sh after every update:"
+echo "the update replaces the client but cannot touch an existing host service."
 echo
 echo "socket: ${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/app/$APP/bwrap-broker.sock"
 echo "logs:   journalctl --user -u flatpak-bwrap-broker@$APP.service -f"

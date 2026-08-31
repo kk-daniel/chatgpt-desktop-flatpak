@@ -115,11 +115,12 @@ fi
 # Both halves have to be offered: the socket being absent usually means the
 # broker was never installed, and "systemctl enable" alone would then answer
 # "Unit not found" and leave the user no further forward.
-if printf '%s' "$out" | grep -q 'install\.sh' &&
+install_hint="\$(flatpak info $APP -l)/files/extra/chatgpt/sandbox-host/install.sh"
+if printf '%s' "$out" | grep -Fq "$install_hint" &&
    printf '%s' "$out" | grep -q 'systemctl --user enable'; then
-  ok "the message covers both never-installed and installed-but-stopped"
+  ok "the message gives the packaged installer and covers a stopped service"
 else
-  bad "the message should offer install.sh as well as systemctl" "$out"
+  bad "the message should offer the packaged installer as well as systemctl" "$out"
 fi
 # The one thing that must never happen: falling back to running the command
 # with less isolation than was asked for.

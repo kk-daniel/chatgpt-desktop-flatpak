@@ -252,7 +252,7 @@ def test_protocol_roundtrip():
 
     # Version skew has to be distinguishable from a foreign client, because it
     # is the expected consequence of updating the flatpak without re-running
-    # host/install.sh.
+    # the sandbox-host/install.sh shipped with the installed Flatpak.
     skewed = bytearray(client.build_request(["bwrap", "--version"], [0, 1, 2]))
     skewed[3] = 99
     try:

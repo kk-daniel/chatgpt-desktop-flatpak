@@ -60,12 +60,12 @@ It is installed separately, because a flatpak cannot install a host service and
 should not be able to:
 
 ```bash
-bash host/install.sh com.openai.ChatGPT
+"$(flatpak info com.openai.ChatGPT -l)/files/extra/chatgpt/sandbox-host/install.sh"
 ```
 
 Without it, sandboxed commands fail with a message naming what to run — both
-`host/install.sh` and `systemctl --user enable`, because from inside the sandbox
-a missing socket cannot be told apart from a stopped service. There is
+the packaged `install.sh` and `systemctl --user enable`, because from inside the
+sandbox a missing socket cannot be told apart from a stopped service. There is
 deliberately no fallback to `flatpak-spawn --host` or to running unsandboxed: a
 missing broker means less isolation than Codex asked for, and that is a thing to
 report, not to work around.
