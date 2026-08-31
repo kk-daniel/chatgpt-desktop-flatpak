@@ -21,12 +21,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Renovate can bump a version string but not the things derived from it:
-  # the 7-Zip checksums, and -- following a ChatGPT bump -- the metainfo
-  # release entry and the bundled Electron. Electron is derived rather than
-  # tracked: the app is built against one exact version, so the payload
-  # decides it and Renovate is not asked. Fill these in on the Renovate
-  # branch before the build job ever sees it.
+  # Renovate can bump the RPM URL version but not the sha256/size Flatpak
+  # extra-data needs. Resolve those through OpenAI's signed RPM-MD metadata and
+  # add the metainfo release before the build job sees a Renovate branch.
   post-renovate:
     runs-on: ubuntu-latest
     # Match on the group slug the branch ends with, not the whole name: with
@@ -45,13 +42,12 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           ref: ${{ github.head_ref }}
           fetch-depth: 2
-      # Before the metainfo, because this is the step that can refuse. A
-      # major Electron change needs a human, and failing here is what stops
-      # the branch merging: build only runs when post-renovate is skipped,
-      # and nothing merges a red pull request.
-      - name: Update Electron to what the payload targets
+      - name: Install updater dependencies
         if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, 'chatgpt')
-        run: '"./${APP_ID}/update-electron-version.sh"'
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml
+      - name: Verify and update ChatGPT RPM metadata
+        if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, 'chatgpt')
+        run: '"./${APP_ID}/update-rpm-metadata.py"'
       - name: Update metainfo
         if: startsWith(github.head_ref, 'renovate/') && endsWith(github.head_ref, 'chatgpt')
         run: '"./${APP_ID}/update-metainfo.sh"'
@@ -105,9 +101,9 @@ jobs:
         id: extract-version
         run: |
           set -eo pipefail
-          VERSION="$(cat "${APP_ID}/expected-version")"
+          VERSION="$(sed -n 's#.*linux/rpm/x86_64/chatgpt-\([0-9][0-9.]*-[0-9][0-9]*\)\.x86_64\.rpm.*#\1#p' "${APP_ID}/${APP_ID}.yaml")"
           if [ -z "$VERSION" ]; then
-            echo "Error: expected-version is empty" >&2
+            echo "Error: ChatGPT RPM version is missing from the manifest" >&2
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -117,10 +113,14 @@ jobs:
           elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
              || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             echo "version-changed=true" >> "$GITHUB_OUTPUT"
-          elif ! git diff --quiet "$BEFORE" "${{ github.sha }}" -- "${APP_ID}/expected-version"; then
-            echo "version-changed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "version-changed=false" >> "$GITHUB_OUTPUT"
+            OLD_VERSION="$(git show "$BEFORE:${APP_ID}/${APP_ID}.yaml" \
+              | sed -n 's#.*linux/rpm/x86_64/chatgpt-\([0-9][0-9.]*-[0-9][0-9]*\)\.x86_64\.rpm.*#\1#p')"
+            if [ "$OLD_VERSION" != "$VERSION" ]; then
+              echo "version-changed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "version-changed=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
   build:
@@ -198,76 +198,41 @@ jobs:
         env:
           BRANCH: ${{ steps.clean-branch-name.outputs.branch }}
         run: |
-          # The payload is no longer part of the build, so what is checked
-          # here is what the build itself is responsible for: Linux native
-          # modules, and the resources symlinks chatgpt-fetch populates.
           set -eo pipefail
           loc="$(flatpak --user info --show-location "${APP_ID}//${BRANCH}")"
+          payload="$loc/files/extra/chatgpt"
+          resources="$payload/resources"
           fail=0
 
           is_elf() { [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; }
 
-          for f in better_sqlite3.node pty.node; do
-            p="$loc/files/share/chatgpt/native/$f"
-            if [ ! -f "$p" ]; then
-              echo "ERROR: native module not built: $f" >&2
+          for f in \
+            "$payload/ChatGPT" \
+            "$resources/codex" \
+            "$resources/codex-code-mode-host" \
+            "$resources/rg" \
+            "$resources/app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+            "$resources/app.asar.unpacked/node_modules/node-pty/build/Release/pty.node" \
+            "$resources/app.asar.unpacked/node_modules/@parcel/watcher-linux-x64-glibc/watcher.node"
+          do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: native RPM payload is missing ${f#"$payload/"}" >&2
               fail=1
-            elif ! is_elf "$p"; then
-              echo "ERROR: not a Linux ELF binary: $f" >&2
+            elif ! is_elf "$f"; then
+              echo "ERROR: not a Linux ELF binary: ${f#"$payload/"}" >&2
               fail=1
             fi
           done
 
-          for link in resources assets; do
-            target="$(readlink "$loc/files/electron/$link" || true)"
-            if [ "$target" != "/var/data/chatgpt/$link" ]; then
-              echo "ERROR: /app/electron/$link points at '$target'" >&2
-              fail=1
-            fi
-          done
-
-          [ -s "$loc/files/share/chatgpt/expected-version" ] \
-            || { echo "ERROR: expected-version missing or empty" >&2; fail=1; }
+          [ -f "$resources/app.asar" ] \
+            || { echo "ERROR: app.asar missing from native RPM" >&2; fail=1; }
+          grep -q '"platform": "linux"' "$payload/owl-shell-runtime.json" \
+            || { echo "ERROR: Owl runtime is not the Linux build" >&2; fail=1; }
+          [ -x "$payload/ChatGPT" ] \
+            || { echo "ERROR: native ChatGPT entry point is not executable" >&2; fail=1; }
 
           [ -x "$loc/files/bin/bwrap" ] \
             || { echo "ERROR: bwrap shim missing or not executable" >&2; fail=1; }
-
-          # Nothing verifies the payload's signature without these two, and
-          # a build that quietly lost either would fetch and unpack exactly
-          # as before -- the check it dropped is the silent kind.
-          [ -x "$loc/files/bin/osslsigncode" ] \
-            || { echo "ERROR: osslsigncode missing or not executable" >&2; fail=1; }
-          roots="$loc/files/share/chatgpt/microsoft-roots.pem"
-          if [ "$(grep -c 'BEGIN CERTIFICATE' "$roots" 2>/dev/null || echo 0)" != "2" ]; then
-            echo "ERROR: expected both Microsoft roots in microsoft-roots.pem" >&2
-            fail=1
-          fi
-          # The patch is the difference between verifying Store packages and
-          # rejecting every one of them, and it applies to a pinned release,
-          # so a bump that silently drops it has to fail here.
-          flatpak run --branch="$BRANCH" --command=osslsigncode "$APP_ID" --version >/dev/null 2>&1 \
-            || { echo "ERROR: osslsigncode does not run" >&2; fail=1; }
-
-          # Unlike the two natives above this one is not swapped into the
-          # payload but resolved out of /app, so the whole package has to be
-          # here -- a missing dependency only shows up as a failed import at
-          # run time.
-          mods="$loc/files/share/chatgpt/node_modules"
-          if [ ! -f "$mods/@parcel/watcher/build/Release/watcher.node" ]; then
-            echo "ERROR: @parcel/watcher not built" >&2
-            fail=1
-          elif ! is_elf "$mods/@parcel/watcher/build/Release/watcher.node"; then
-            echo "ERROR: not a Linux ELF binary: watcher.node" >&2
-            fail=1
-          fi
-
-          for f in @parcel/watcher/index.js @parcel/watcher/wrapper.js \
-                   @parcel/watcher/package.json detect-libc picomatch \
-                   is-glob is-extglob
-          do
-            [ -e "$mods/$f" ] \
-              || { echo "ERROR: @parcel/watcher tree incomplete: $f" >&2; fail=1; }
-          done
 
           [ "$fail" -eq 0 ] && echo "Build output looks sane"
           exit "$fail"
@@ -308,13 +273,8 @@ jobs:
       # for. Measured, not assumed -- it is why the earlier attempt to
       # accommodate root was abandoned.
       #
-      # The app is installed into root's user installation by the step above,
-      # and this hands that installation to the test user. One way: it is not
-      # given back, so every later step that touches it runs as the tester too.
-      # Root reading it afterwards is what broke the fetch test -- flatpak's own
-      # bwrap fails on a passed descriptor with "Can't find source path
-      # /proc/self/fd/N: Permission denied". The steps after the fetch test work
-      # on the workspace repo, not the installation, so they are unaffected.
+      # The app is installed into root's user installation by the step above;
+      # hand that installation to the unprivileged broker test user.
       - name: Set up the unprivileged test user
         id: test-user
         env:
@@ -394,133 +354,6 @@ jobs:
           python3 host/run-as-uid.py "${{ steps.test-user.outputs.uid }}" \
             bash host/test-broker-live.sh
 
-      # The risky logic now runs on the user's machine at first launch, so
-      # exercise it for real: download the current package and unpack it
-      # exactly as a first start would. Skipped on pull requests, where the
-      # ~700 MB round trip is not worth the feedback delay.
-      - name: End-to-end fetch test
-        if: github.event_name != 'pull_request'
-        env:
-          BRANCH: ${{ steps.clean-branch-name.outputs.branch }}
-          HOME: /home/tester
-          USER: tester
-          XDG_DATA_HOME: ${{ steps.test-user.outputs.data-home }}
-          XDG_RUNTIME_DIR: /run/user/${{ steps.test-user.outputs.uid }}
-        run: |
-          set -eo pipefail
-          # As the tester, because the installation is theirs now. Written to a
-          # file rather than piped in: the fetch runs flatpak, and a script on
-          # stdin would be eaten by the first command that reads it.
-          cat > /tmp/e2e-fetch.sh <<'E2E'
-          set -eo pipefail
-          flatpak run --branch="$BRANCH" --command=chatgpt-fetch "$APP_ID"
-
-          data="$HOME/.var/app/${APP_ID}/data/chatgpt"
-          res="$data/resources"
-          fail=0
-
-          is_elf() { [ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; }
-
-          [ -s "$data/version" ] || { echo "ERROR: no version recorded" >&2; fail=1; }
-          [ -f "$res/app.asar" ] || { echo "ERROR: app.asar missing" >&2; fail=1; }
-
-          for f in \
-            "$res/app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-            "$res/app.asar.unpacked/node_modules/node-pty/build/Release/pty.node" \
-            "$res/codex" "$res/rg"
-          do
-            if [ ! -f "$f" ]; then
-              echo "ERROR: missing after fetch: $f" >&2
-              fail=1
-            elif ! is_elf "$f"; then
-              echo "ERROR: Windows binary survived the swap: $f" >&2
-              fail=1
-            fi
-          done
-
-          [ -x "$res/codex" ] || { echo "ERROR: codex CLI not executable" >&2; fail=1; }
-
-          if [ -n "$(find "$res" -name '*%*' -print -quit 2>/dev/null)" ]; then
-            echo "ERROR: percent-encoded paths left undecoded" >&2
-            find "$res" -name '*%*' | head -5 >&2
-            fail=1
-          fi
-
-          if [ -n "$(find "$res" \( -name '*.exe' -o -name '*.dll' \) -print -quit 2>/dev/null)" ]; then
-            echo "ERROR: Windows binaries left in the unpacked tree" >&2
-            fail=1
-          fi
-
-          # chatgpt-fetch records the Electron the payload was built
-          # against. A major gap means the bundled Electron is wrong for
-          # this build, and the symptom on a user's machine is an API that
-          # silently does not exist -- so fail here instead. This is what
-          # tells us an Electron bump is actually required, rather than
-          # guessing from Renovate's version numbers.
-          loc="$(flatpak --user info --show-location "${APP_ID}//${BRANCH}")"
-          target="$(cat "$data/electron-target" 2>/dev/null || true)"
-          ours="$(cat "$loc/files/electron/version" 2>/dev/null || true)"
-          if [ -z "$target" ] || [ -z "$ours" ]; then
-            echo "ERROR: could not compare Electron versions (target='$target' bundled='$ours')" >&2
-            fail=1
-          elif [ "${target%%.*}" != "${ours%%.*}" ]; then
-            echo "ERROR: payload targets Electron $target but this Flatpak bundles $ours" >&2
-            echo "Run update-electron-version.sh; a major needs checking by hand." >&2
-            fail=1
-          elif [ "$target" != "$ours" ]; then
-            echo "note: payload targets Electron $target, bundling $ours (same major)"
-          fi
-
-          # The payload has no @parcel/watcher, so the app reaches ours by
-          # walking node_modules up out of app.asar. Check the link, then
-          # prove the whole chain works from a file sitting where the app's
-          # worker does: bare specifier resolved, native binding loaded, and
-          # inotify actually delivering events inside the sandbox. A named
-          # import, because the app destructures the namespace it gets from
-          # `await import(...)`.
-          [ "$(readlink "$data/node_modules" || true)" = "/app/share/chatgpt/node_modules" ] \
-            || { echo "ERROR: node_modules link missing beside the payload" >&2; fail=1; }
-
-          cat > "$data/parcel-probe.mjs" <<'PROBE'
-          import {subscribe} from '@parcel/watcher';
-          import {mkdtemp, writeFile} from 'node:fs/promises';
-          import {tmpdir} from 'node:os';
-          import {join} from 'node:path';
-
-          const dir = await mkdtemp(join(tmpdir(), 'watch-'));
-          const events = [];
-          const sub = await subscribe(dir, (err, evs) => {
-            if (!err) events.push(...evs);
-          }, {backend: 'inotify'});
-
-          await new Promise(r => setTimeout(r, 500));
-          await writeFile(join(dir, 'probe.txt'), 'x');
-          await new Promise(r => setTimeout(r, 2000));
-          await sub.unsubscribe();
-
-          if (!events.some(e => e.path.endsWith('probe.txt'))) {
-            console.error('no inotify events delivered');
-            process.exit(1);
-          }
-          console.log(`@parcel/watcher resolved and delivered ${events.length} event(s)`);
-          PROBE
-          flatpak run --branch="$BRANCH" --command=node "$APP_ID" \
-            /var/data/chatgpt/parcel-probe.mjs \
-            || { echo "ERROR: @parcel/watcher unusable in the sandbox" >&2; fail=1; }
-          rm -f "$data/parcel-probe.mjs"
-
-          # A second run must be a silent no-op, not another download.
-          before="$(cat "$data/version" 2>/dev/null || true)"
-          flatpak run --branch="$BRANCH" --command=chatgpt-fetch "$APP_ID"
-          [ "$(cat "$data/version")" = "$before" ] \
-            || { echo "ERROR: second fetch changed the payload" >&2; fail=1; }
-
-          [ "$fail" -eq 0 ] && echo "Fetched and unpacked ChatGPT $before cleanly"
-          exit "$fail"
-          E2E
-          chmod a+rx /tmp/e2e-fetch.sh
-          python3 host/run-as-uid.py "${{ steps.test-user.outputs.uid }}" \
-            bash /tmp/e2e-fetch.sh
       - name: Upload bundle
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
