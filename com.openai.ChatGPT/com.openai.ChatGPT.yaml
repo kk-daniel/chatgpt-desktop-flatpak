@@ -126,15 +126,15 @@ modules:
       - type: extra-data
         filename: chatgpt-x86_64.rpm
         only-arches: [x86_64]
-        url: https://persistent.oaistatic.com/codex-app-prod/linux/rpm/x86_64/chatgpt-26.1007.71326-1.x86_64.rpm
-        sha256: 9595baf80132c15bc7d73e8db2667b923d991f4ce25238160659722a349bf35f
-        size: 556852593
+        url: https://persistent.oaistatic.com/codex-app-prod/linux/rpm/x86_64/chatgpt-26.1013.40934-1.x86_64.rpm
+        sha256: 4af029bbaab60a5220466d5b678b5a64ee3b1b63cada8f0002ee66062bc8395f
+        size: 559195437
       - type: extra-data
         filename: chatgpt-aarch64.rpm
         only-arches: [aarch64]
-        url: https://persistent.oaistatic.com/codex-app-prod/linux/rpm/aarch64/chatgpt-26.1007.71326-1.aarch64.rpm
-        sha256: 996132f32e04fd34699b8ce69ea43cc899a9018210cb5bcb6eb30e6838916bac
-        size: 533175617
+        url: https://persistent.oaistatic.com/codex-app-prod/linux/rpm/aarch64/chatgpt-26.1013.40934-1.aarch64.rpm
+        sha256: eb610bc95be19a282881a2cf5039a1e1a958abfba87b7d5decd48cb75600ad17
+        size: 535294705
       - type: file
         path: apply_extra
       - type: file
