@@ -65,13 +65,13 @@ modules:
     sources:
       - type: archive
         only-arches: [x86_64]
-        url: https://github.com/ip7z/7zip/releases/download/26.05/7z2605-linux-x64.tar.xz
-        sha256: 22cf82fcc6eb7474f1d5bb4f02c0f8ebd573a718089d6833dc30f8350a3b232e
+        url: https://github.com/ip7z/7zip/releases/download/26.06/7z2606-linux-x64.tar.xz
+        sha256: 2b539cf067b2ad48e1baa5093dbaa8818b73542d1222a0ffde9dc5f2922ea62e
         strip-components: 0
       - type: archive
         only-arches: [aarch64]
-        url: https://github.com/ip7z/7zip/releases/download/26.05/7z2605-linux-arm64.tar.xz
-        sha256: 0b71f6cfc34669b3bf69f2347efd3429f77020665003a13b9cdc53b784270421
+        url: https://github.com/ip7z/7zip/releases/download/26.06/7z2606-linux-arm64.tar.xz
+        sha256: edcc408aacce77da5223728f2eceb5e9f6dc713b8a9df934ad21e2a7f7560627
         strip-components: 0
 
   # The broker executes this copy inside the Flatpak's mount namespace. It is
