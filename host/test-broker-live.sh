@@ -255,8 +255,10 @@ out=$(flatpak run --filesystem="$tmp:ro" --command=sh "$REF" -c "
   exec 8<'$tmp/allow.bpf'
   bwrap --unshare-user --ro-bind / / --seccomp 8 --chdir / -- /bin/sh -c 'echo seccomp-fd-ok'
   exec 7<'$tmp/args'
-  bwrap --args 7 -- /bin/sh -c 'echo args-fd-ok'" 2>&1)
-for want in seccomp-fd-ok args-fd-ok; do
+  bwrap --args 7 -- /bin/sh -c 'echo args-fd-ok'
+  exec 9<'$tmp/args'
+  bwrap --unshare-user --ro-bind / / --chdir / -- /bin/sh -c 'test -e /proc/self/fd/9 && echo inherited-fd-ok'" 2>&1)
+for want in seccomp-fd-ok args-fd-ok inherited-fd-ok; do
   if printf '%s' "$out" | grep -qx "$want"; then
     ok "$want"
   else

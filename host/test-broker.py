@@ -300,6 +300,24 @@ def test_descriptor_scan():
     check(client.descriptors_in(["--", "--seccomp", "9"]) == [],
           "nothing after -- is parsed as a flag")
 
+    # Codex's proxy control sockets reach its helper this way: inherited, and
+    # named only after --.
+    kept, dropped = os.pipe()
+    os.set_inheritable(kept, True)
+    try:
+        inherited = client.inherited_descriptors()
+        check(kept in inherited, "an inherited descriptor is forwarded")
+        check(dropped not in inherited, "a close-on-exec descriptor is not")
+        check(all(fd > 2 for fd in inherited), "stdio is not counted twice")
+        forwarded = client.forwarded_descriptors(
+            ["--seccomp", str(kept), "--", "/bin/true"])
+        check(forwarded[:3] == [0, 1, 2]
+              and forwarded.count(kept) == 1,
+              "a descriptor both named and inherited is sent once")
+    finally:
+        os.close(kept)
+        os.close(dropped)
+
     every = set(client.FD_ARGUMENT) - {"--args"}
     check(every <= set(client.ARITY),
           "every fd-taking flag has an arity entry")

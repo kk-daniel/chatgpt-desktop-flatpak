@@ -176,8 +176,9 @@ the argv convention silently dropped the first bwrap flag so that sandboxes ran
 with one less restriction than asked for and still reported success. So the live
 script asserts the properties directly — the command's uid and capabilities,
 read-only mounts that really refuse writes, pid and network isolation,
-descriptor-passing flags, exit status, twelve sequential and eight concurrent
-sandboxes, that nesting is refused with an explanation, and that a missing
+descriptor-passing flags and inherited descriptors, exit status, twelve
+sequential and eight concurrent sandboxes, that nesting is refused with an
+explanation, and that a missing
 broker fails loudly instead of falling back.
 
 Both run in CI, because the broker needs no session bus. That is a change from
