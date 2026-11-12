@@ -576,10 +576,11 @@ def become_unprivileged(uid, gid):
 
 
 def install_fds(received, wanted, preserve=None):
-    """Put each descriptor back on the number the client's argv refers to.
+    """Put each descriptor back on the number the client had it on.
 
     bwrap's fd-taking flags -- --seccomp, --args, --bind-fd and the rest -- name
-    descriptors by number, so the numbers have to be restored before exec.
+    descriptors by number, and so does a command that relies on inheriting one,
+    so the numbers have to be restored before exec.
 
     Everything is parked above the highest target first. Moving them one at a
     time would let a request that maps 4->3 and 3->4 clobber one with the

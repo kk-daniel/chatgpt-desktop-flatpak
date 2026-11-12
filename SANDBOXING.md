@@ -219,7 +219,10 @@ matched, and a translation table stood between them. All of it is gone:
   descriptors the portal did not carry, which surfaced as `--bind-fd: Not an
   open file descriptor: 15`. Descriptors cross the broker's socket over
   `SCM_RIGHTS` and are restored to their original numbers before exec, so the
-  helper runs as Codex intended and its seccomp filter is applied.
+  helper runs as Codex intended and its seccomp filter is applied. That covers
+  descriptors no flag names, too: Codex's managed network proxy hands its
+  control sockets to the helper as plain inherited descriptors, so the client
+  forwards everything left open without close-on-exec, as an exec would.
 * **The fidelity gap.** Under the portal, `/etc`, `/var`, `/run`, `/home` and
   `/tmp` were writable but discarded, so a command that wrote there and checked
   only the exit status believed it had succeeded. The mounts are flatpak's now,

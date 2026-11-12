@@ -10,8 +10,9 @@ codex-linux-sandbox helper -- is gone, because the descriptors and the mount
 namespace both survive the hop now.
 
 The only real work is descriptors. bubblewrap's fd-taking flags name
-descriptors by number, so this finds them, sends them over SCM_RIGHTS, and tells
-the broker which numbers to put them back on before exec.
+descriptors by number, and the command inherits whatever else was left open
+without close-on-exec, so this collects both, sends them over SCM_RIGHTS, and
+tells the broker which numbers to put them back on before exec.
 
 There is no fallback. If the broker is not running, this fails and says so; it
 never runs the command with less isolation than Codex asked for.
@@ -19,6 +20,7 @@ never runs the command with less isolation than Codex asked for.
 
 import array
 import errno
+import fcntl
 import os
 import select
 import signal
@@ -187,6 +189,38 @@ def descriptors_in(argv):
     return wanted
 
 
+def inherited_descriptors():
+    """Every descriptor above stdio that an exec would carry across.
+
+    bubblewrap passes these on to the command, and Codex depends on it: its
+    managed network proxy hands control sockets to the inner helper as plain
+    inherited descriptors, named only after `--` in --proxy-route-spec, where
+    the flag walk cannot see them. Python opens its own descriptors
+    close-on-exec, so what remains is what the caller left open.
+    """
+    found = []
+    for name in os.listdir("/proc/self/fd"):
+        fd = int(name)
+        if fd <= 2:
+            continue
+        try:
+            flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+        except OSError:
+            # The directory handle listdir used, closed by now.
+            continue
+        if not flags & fcntl.FD_CLOEXEC:
+            found.append(fd)
+    return sorted(found)
+
+
+def forwarded_descriptors(options):
+    fds = [0, 1, 2]
+    for fd in descriptors_in(options) + inherited_descriptors():
+        if fd not in fds:
+            fds.append(fd)
+    return fds
+
+
 # --- request --------------------------------------------------------------
 
 
@@ -310,7 +344,7 @@ def main():
             die(f"{REAL_BWRAP}: {e}")
 
     options = expand_args_fd(options)
-    fds = [0, 1, 2] + [f for f in descriptors_in(options) if f > 2]
+    fds = forwarded_descriptors(options)
     if len(fds) > MAX_FDS:
         die(f"too many descriptors to forward ({len(fds)})")
 
