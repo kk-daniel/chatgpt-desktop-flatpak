@@ -4,7 +4,6 @@
     "config:recommended",
     "helpers:pinGitHubActionDigests"
   ],
-  "platformAutomerge": false,
   "packageRules": [
     {
       "description": "ChatGPT Desktop",
